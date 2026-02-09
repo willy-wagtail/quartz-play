@@ -1,6 +1,7 @@
 package com.willy.quartzplay.service;
 
 import com.willy.quartzplay.controller.JobDetailResponse;
+import com.willy.quartzplay.listener.TriggerOriginJobListener;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
@@ -52,7 +53,7 @@ public class JobManagementService {
                     toInstant(trigger.getPreviousFireTime())
                 );
               } catch (SchedulerException e) {
-                throw new SchedulerAccessException("Failed to read trigger state", e);
+                throw new JobListException(e);
               }
             })
             .toList();
@@ -67,7 +68,7 @@ public class JobManagementService {
       }
       return result;
     } catch (SchedulerException e) {
-      throw new SchedulerAccessException("Failed to list jobs", e);
+      throw new JobListException(e);
     }
   }
 
@@ -83,12 +84,36 @@ public class JobManagementService {
       requireJobNotRunning(jobKey);
 
       JobDataMap data = new JobDataMap();
-      data.put("trigger.manual", true);
+      data.put(TriggerOriginJobListener.TRIGGER_MANUAL_KEY, true);
 
       log.info("Triggering job: {}", jobName);
       scheduler.triggerJob(jobKey, data);
     } catch (SchedulerException e) {
-      throw new SchedulerAccessException("Failed to trigger job: " + jobName, e);
+      throw new JobTriggerException(jobName, e);
+    }
+  }
+
+  public void pauseJob(String jobName) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+
+      log.info("Pausing job: {}", jobName);
+      scheduler.pauseJob(jobKey);
+    } catch (SchedulerException e) {
+      throw new JobPauseException(jobName, e);
+    }
+  }
+
+  public void resumeJob(String jobName) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+
+      log.info("Resuming job: {}", jobName);
+      scheduler.resumeJob(jobKey);
+    } catch (SchedulerException e) {
+      throw new JobResumeException(jobName, e);
     }
   }
 
@@ -127,9 +152,30 @@ public class JobManagementService {
   }
 
   @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
-  public static class SchedulerAccessException extends RuntimeException {
-    public SchedulerAccessException(String message, Throwable cause) {
-      super(message, cause);
+  public static class JobListException extends RuntimeException {
+    public JobListException(Throwable cause) {
+      super("Failed to list jobs", cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class JobTriggerException extends RuntimeException {
+    public JobTriggerException(String jobName, Throwable cause) {
+      super("Failed to trigger job: " + jobName, cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class JobPauseException extends RuntimeException {
+    public JobPauseException(String jobName, Throwable cause) {
+      super("Failed to pause job: " + jobName, cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class JobResumeException extends RuntimeException {
+    public JobResumeException(String jobName, Throwable cause) {
+      super("Failed to resume job: " + jobName, cause);
     }
   }
 }

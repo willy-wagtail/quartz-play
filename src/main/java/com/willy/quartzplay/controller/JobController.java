@@ -29,4 +29,16 @@ public class JobController {
         jobManagementService.triggerJob(name);
         return ResponseEntity.ok(new JobResponse("triggered", name));
     }
+
+    @PostMapping("/{name}/pause")
+    public ResponseEntity<JobResponse> pause(@PathVariable String name) {
+        jobManagementService.pauseJob(name);
+        return ResponseEntity.ok(new JobResponse("paused", name));
+    }
+
+    @PostMapping("/{name}/resume")
+    public ResponseEntity<JobResponse> resume(@PathVariable String name) {
+        jobManagementService.resumeJob(name);
+        return ResponseEntity.ok(new JobResponse("resumed", name));
+    }
 }

@@ -8,6 +8,8 @@ import org.slf4j.LoggerFactory;
 
 public class TriggerOriginJobListener implements JobListener {
 
+    public static final String TRIGGER_MANUAL_KEY = "trigger.manual";
+
     private static final Logger log = LoggerFactory.getLogger(TriggerOriginJobListener.class);
 
     @Override
@@ -17,7 +19,7 @@ public class TriggerOriginJobListener implements JobListener {
 
     @Override
     public void jobToBeExecuted(JobExecutionContext context) {
-        boolean manual = context.getMergedJobDataMap().getBoolean("trigger.manual");
+        boolean manual = context.getMergedJobDataMap().getBoolean(TRIGGER_MANUAL_KEY);
         String jobName = context.getJobDetail().getKey().getName();
         log.info("{}: {}", jobName, manual ? "Manually triggered" : "Triggered by scheduler");
     }
