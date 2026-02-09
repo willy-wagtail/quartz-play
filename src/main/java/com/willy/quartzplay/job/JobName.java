@@ -10,15 +10,6 @@ public enum JobName {
         this.value = value;
     }
 
-    public static JobName fromValue(String value) {
-        for (JobName name : values()) {
-            if (name.value.equals(value)) {
-                return name;
-            }
-        }
-        throw new IllegalArgumentException("Unknown job name: " + value);
-    }
-
     @Override
     public String toString() {
         return value;

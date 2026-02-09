@@ -1,10 +1,9 @@
 package com.willy.quartzplay.controller;
 
-import com.willy.quartzplay.job.GroupName;
-import com.willy.quartzplay.job.JobName;
 import com.willy.quartzplay.service.JobManagementService;
-import org.quartz.SchedulerException;
+import java.util.List;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -20,9 +19,14 @@ public class JobController {
         this.jobManagementService = jobManagementService;
     }
 
+    @GetMapping
+    public ResponseEntity<List<JobDetailResponse>> listJobs() {
+        return ResponseEntity.ok(jobManagementService.listJobs());
+    }
+
     @PostMapping("/{name}/trigger")
-    public ResponseEntity<JobResponse> trigger(@PathVariable JobName name) throws SchedulerException {
+    public ResponseEntity<JobResponse> trigger(@PathVariable String name) {
         jobManagementService.triggerJob(name);
-        return ResponseEntity.ok(new JobResponse("triggered", name.toString(), GroupName.DEFAULT.toString()));
+        return ResponseEntity.ok(new JobResponse("triggered", name));
     }
 }
