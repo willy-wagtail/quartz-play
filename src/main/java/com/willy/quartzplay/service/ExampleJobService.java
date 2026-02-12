@@ -9,13 +9,9 @@ public class ExampleJobService {
 
     private static final Logger log = LoggerFactory.getLogger(ExampleJobService.class);
 
-    public void run() {
+    public void run() throws InterruptedException {
         log.info("Example job running...");
-        try {
-            Thread.sleep(500);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        Thread.sleep(10_000);
         log.info("Example job complete.");
     }
 }

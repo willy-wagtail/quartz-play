@@ -1,0 +1,14 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-skip-next-table
+      author: willy
+      changes:
+        - createTable:
+            tableName: SKIP_NEXT
+            columns:
+              - column:
+                  name: JOB_NAME
+                  type: VARCHAR(200)
+                  constraints:
+                    primaryKey: true
+                    nullable: false

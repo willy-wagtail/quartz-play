@@ -21,17 +21,18 @@ spring:
       ddl-auto: validate
     open-in-view: false
 
+  kafka:
+    consumer:
+      auto-offset-reset: latest
+
   quartz:
     job-store-type: jdbc
     jdbc:
       initialize-schema: never
-    scheduler-name: QuartzPlayScheduler
     overwrite-existing-jobs: true # Needed when using a persistent DB (e.g. PostgreSQL)
     properties:
       org.quartz.jobStore.isClustered: true
-      org.quartz.jobStore.clusterCheckinInterval: 10000 # 10 seconds
       org.quartz.scheduler.instanceId: AUTO
-      org.quartz.threadPool.threadCount: 5
 
 management:
   endpoints:
@@ -44,4 +45,4 @@ management:
 
 app:
   jobs:
-    example-job-cron: "0/30 * * * * ?" # Every 30 seconds
+    example-job-cron: "0 0 * * * ?" # Every hour

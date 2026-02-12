@@ -1,3 +1,5 @@
 databaseChangeLog:
   - include:
-      file: db/changelog/changesets/001-quartz-tables.yaml
+      file: org/quartz/impl/jdbcjobstore/liquibase.quartz.init.xml
+  - include:
+      file: db/changelog/001-create-skip-next-table.yaml

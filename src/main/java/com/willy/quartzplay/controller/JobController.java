@@ -41,4 +41,16 @@ public class JobController {
         jobManagementService.resumeJob(name);
         return ResponseEntity.ok(new JobResponse("resumed", name));
     }
+
+    @PostMapping("/{name}/interrupt")
+    public ResponseEntity<JobResponse> interrupt(@PathVariable String name) {
+        jobManagementService.interruptJob(name);
+        return ResponseEntity.ok(new JobResponse("interrupted", name));
+    }
+
+    @PostMapping("/{name}/skip-next")
+    public ResponseEntity<JobResponse> skipNext(@PathVariable String name) {
+        jobManagementService.skipNextExecution(name);
+        return ResponseEntity.ok(new JobResponse("skipped", name));
+    }
 }
