@@ -2,6 +2,13 @@ databaseChangeLog:
   - changeSet:
       id: 001-create-skip-next-table
       author: willy
+      comment: >-
+        Stores job names whose next cron firing should be skipped.
+        A row present means skip-next is pending. SkipNextTriggerListener
+        checks this table on every cron firing — if a row exists, it vetoes
+        the execution and deletes the row so subsequent firings proceed normally.
+        This table is decoupled from Quartz's schema because
+        overwrite-existing-jobs=true wipes trigger/JobDataMap state on restart.
       changes:
         - createTable:
             tableName: SKIP_NEXT

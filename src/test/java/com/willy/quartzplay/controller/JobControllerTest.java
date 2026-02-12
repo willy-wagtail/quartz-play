@@ -148,16 +148,23 @@ class JobControllerTest {
 
     private void registerJobWithCronTrigger(String name, Class<? extends Job> jobClass, String cron)
             throws SchedulerException {
+        registerJobWithCronTrigger(name, jobClass, cron, 0);
+    }
+
+    private void registerJobWithCronTrigger(String name, Class<? extends Job> jobClass, String cron,
+                                            int startDelaySeconds) throws SchedulerException {
         JobDetail job = JobBuilder.newJob(jobClass)
                 .withIdentity(name)
                 .storeDurably()
                 .build();
-        Trigger trigger = TriggerBuilder.newTrigger()
+        var tb = TriggerBuilder.newTrigger()
                 .withIdentity(name + "-trigger")
                 .forJob(job)
-                .withSchedule(CronScheduleBuilder.cronSchedule(cron))
-                .build();
-        scheduler.scheduleJob(job, trigger);
+                .withSchedule(CronScheduleBuilder.cronSchedule(cron));
+        if (startDelaySeconds > 0) {
+            tb.startAt(DateBuilder.futureDate(startDelaySeconds, DateBuilder.IntervalUnit.SECOND));
+        }
+        scheduler.scheduleJob(job, tb.build());
     }
 
     // -- Trigger tests --
@@ -396,10 +403,10 @@ class JobControllerTest {
                 .hasStatus(404);
     }
 
-    // -- Skip-next tests --
+    // -- Skip-next endpoint tests --
 
     @Test
-    void skipNext_jobWithCronTrigger_succeeds() throws Exception {
+    void skipNext_jobWithCronTrigger_savesSkipFlag() throws Exception {
         registerJobWithCronTrigger("cron-job", NullJob.class, "0 0 0 * * ?");
 
         assertThat(mockMvcTester.post().uri("/api/jobs/cron-job/skip-next"))
@@ -428,10 +435,19 @@ class JobControllerTest {
     }
 
     @Test
-    void skipNext_jobWithNoTriggers_returns409() throws Exception {
+    void skipNext_durableJobWithNoTriggers_returns409() throws Exception {
         registerJob("durable-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/durable-job/skip-next"))
+                .hasStatus4xxClientError()
+                .hasStatus(409);
+    }
+
+    @Test
+    void skipNext_jobWithOnlySimpleTrigger_returns409() throws Exception {
+        registerJobWithTrigger("simple-trigger-job", NullJob.class);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/simple-trigger-job/skip-next"))
                 .hasStatus4xxClientError()
                 .hasStatus(409);
     }
@@ -448,40 +464,45 @@ class JobControllerTest {
         assertThat(skipNextStorage.exists("idempotent-cron-job")).isTrue();
     }
 
+    // -- Skip-next trigger listener tests --
+
     @Test
     void skipNext_vetoesNextCronFiring(CapturedOutput output) throws Exception {
-        // Use a cron that fires every second
-        registerJobWithCronTrigger("skip-me", RecordingJob.class, "* * * * * ?");
-        skipNextStorage.save("skip-me");
+        // Delay start so the skip flag is set before the first cron firing
+        registerJobWithCronTrigger("veto-job", RecordingJob.class, "* * * * * ?", 2);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/veto-job/skip-next"))
+                .hasStatusOk();
 
         // Poll until the skip flag is consumed (confirming the veto happened)
         long deadline = System.currentTimeMillis() + 3000;
-        while (skipNextStorage.exists("skip-me") && System.currentTimeMillis() < deadline) {
+        while (skipNextStorage.exists("veto-job") && System.currentTimeMillis() < deadline) {
             Thread.sleep(50);
         }
 
         // Immediately pause to prevent the next cron firing from executing the job
-        scheduler.pauseJob(JobKey.jobKey("skip-me"));
+        scheduler.pauseJob(JobKey.jobKey("veto-job"));
 
-        assertThat(skipNextStorage.exists("skip-me"))
+        assertThat(skipNextStorage.exists("veto-job"))
                 .as("Skip flag should be deleted after veto")
                 .isFalse();
         assertThat(RecordingJob.executed.get())
                 .as("RecordingJob should have been vetoed")
                 .isFalse();
-        assertThat(output).contains("Vetoing execution of job: skip-me");
+        assertThat(output).contains("Vetoing execution of job: veto-job");
     }
 
     @Test
     void skipNext_doesNotVetoManualTrigger() throws Exception {
         registerJobWithCronTrigger("manual-ok", RecordingJob.class, "0 0 0 * * ?");
-        skipNextStorage.save("manual-ok");
 
-        // Manual trigger via endpoint (creates a SimpleTrigger, not CronTrigger)
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-ok/skip-next"))
+                .hasStatusOk();
+
+        // Manual trigger via endpoint creates a SimpleTrigger — listener should not veto it
         assertThat(mockMvcTester.post().uri("/api/jobs/manual-ok/trigger"))
                 .hasStatusOk();
 
-        // Give the job time to execute
         Thread.sleep(500);
 
         assertThat(RecordingJob.executed.get())
@@ -489,6 +510,33 @@ class JobControllerTest {
                 .isTrue();
         assertThat(skipNextStorage.exists("manual-ok"))
                 .as("Skip flag should still be present for next cron firing")
+                .isTrue();
+    }
+
+    @Test
+    void skipNext_afterVeto_subsequentCronFiresNormally() throws Exception {
+        // Delay start so the skip flag is set before the first cron firing
+        registerJobWithCronTrigger("resume-after-skip", RecordingJob.class, "* * * * * ?", 2);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/resume-after-skip/skip-next"))
+                .hasStatusOk();
+
+        // Poll until the skip flag is consumed (first firing vetoed)
+        long deadline = System.currentTimeMillis() + 3000;
+        while (skipNextStorage.exists("resume-after-skip") && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+
+        // Wait for the next cron firing to execute normally
+        deadline = System.currentTimeMillis() + 3000;
+        while (!RecordingJob.executed.get() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+
+        scheduler.pauseJob(JobKey.jobKey("resume-after-skip"));
+
+        assertThat(RecordingJob.executed.get())
+                .as("Job should execute normally after skip is consumed")
                 .isTrue();
     }
 }
