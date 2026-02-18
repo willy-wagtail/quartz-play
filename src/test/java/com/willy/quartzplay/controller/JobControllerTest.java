@@ -1,6 +1,8 @@
 package com.willy.quartzplay.controller;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import com.willy.quartzplay.listener.SkipNextTriggerListener;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
@@ -96,6 +98,8 @@ class JobControllerTest {
         }
     }
 
+    // Records whether it was executed. Used by trigger listener tests to assert
+    // that a job was vetoed (executed == false) or allowed through (executed == true).
     public static class RecordingJob implements Job {
         static final AtomicBoolean executed = new AtomicBoolean(false);
 
@@ -117,7 +121,7 @@ class JobControllerTest {
         scheduler.addJob(job, false);
     }
 
-    private void registerJobWithTrigger(String name, Class<? extends Job> jobClass)
+    private void registerJobWithSimpleTrigger(String name, Class<? extends Job> jobClass)
             throws SchedulerException {
         JobDetail job = JobBuilder.newJob(jobClass)
                 .withIdentity(name)
@@ -211,7 +215,7 @@ class JobControllerTest {
 
     @Test
     void triggerJob_pausedJob_succeeds() throws Exception {
-        registerJobWithTrigger("paused-job", NullJob.class);
+        registerJobWithSimpleTrigger("paused-job", NullJob.class);
         scheduler.pauseJob(JobKey.jobKey("paused-job"));
 
         assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("paused-job-trigger")))
@@ -260,7 +264,7 @@ class JobControllerTest {
 
     @Test
     void pauseJob_jobWithTriggers_pausesTriggers() throws Exception {
-        registerJobWithTrigger("pausable-job", NullJob.class);
+        registerJobWithSimpleTrigger("pausable-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/pausable-job/pause"))
                 .hasStatusOk();
@@ -287,7 +291,7 @@ class JobControllerTest {
 
     @Test
     void pauseJob_alreadyPausedJob_succeeds() throws Exception {
-        registerJobWithTrigger("paused-job", NullJob.class);
+        registerJobWithSimpleTrigger("paused-job", NullJob.class);
         scheduler.pauseJob(JobKey.jobKey("paused-job"));
 
         assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("paused-job-trigger")))
@@ -303,7 +307,7 @@ class JobControllerTest {
     @Test
     void pauseJob_runningJob_pausesTriggersButJobKeepsRunning() throws Exception {
         BlockingJob.reset();
-        registerJobWithTrigger("running-job", BlockingJob.class);
+        registerJobWithSimpleTrigger("running-job", BlockingJob.class);
 
         // Start the job
         assertThat(mockMvcTester.post().uri("/api/jobs/running-job/trigger"))
@@ -332,7 +336,7 @@ class JobControllerTest {
 
     @Test
     void resumeJob_pausedJob_resumesTriggers() throws Exception {
-        registerJobWithTrigger("resumable-job", NullJob.class);
+        registerJobWithSimpleTrigger("resumable-job", NullJob.class);
         scheduler.pauseJob(JobKey.jobKey("resumable-job"));
 
         // Verify it's paused first
@@ -349,7 +353,7 @@ class JobControllerTest {
 
     @Test
     void resumeJob_alreadyResumedJob_succeeds() throws Exception {
-        registerJobWithTrigger("active-job", NullJob.class);
+        registerJobWithSimpleTrigger("active-job", NullJob.class);
 
         // Trigger state is NORMAL (not paused) — resuming is a no-op
         assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("active-job-trigger")))
@@ -365,7 +369,7 @@ class JobControllerTest {
     @Test
     void resumeJob_runningJob_resumesTriggersAndJobKeepsRunning() throws Exception {
         BlockingJob.reset();
-        registerJobWithTrigger("running-job", BlockingJob.class);
+        registerJobWithSimpleTrigger("running-job", BlockingJob.class);
 
         // Start the job, then pause its triggers
         assertThat(mockMvcTester.post().uri("/api/jobs/running-job/trigger"))
@@ -445,7 +449,7 @@ class JobControllerTest {
 
     @Test
     void skipNext_jobWithOnlySimpleTrigger_returns409() throws Exception {
-        registerJobWithTrigger("simple-trigger-job", NullJob.class);
+        registerJobWithSimpleTrigger("simple-trigger-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/simple-trigger-job/skip-next"))
                 .hasStatus4xxClientError()
@@ -464,6 +468,91 @@ class JobControllerTest {
         assertThat(skipNextStorage.exists("idempotent-cron-job")).isTrue();
     }
 
+    // -- Cancel skip-next tests --
+
+    @Test
+    void cancelSkipNext_existingSkipFlag_deletesFlag() throws Exception {
+        registerJobWithCronTrigger("cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/cron-job/skip-next"))
+                .hasStatusOk();
+        assertThat(skipNextStorage.exists("cron-job")).isTrue();
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/cron-job/skip-next"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("skip-cancelled");
+
+        assertThat(skipNextStorage.exists("cron-job")).isFalse();
+    }
+
+    @Test
+    void cancelSkipNext_noSkipFlagSet_isIdempotent() throws Exception {
+        registerJobWithCronTrigger("cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/cron-job/skip-next"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("skip-cancelled");
+    }
+
+    @Test
+    void cancelSkipNext_nonExistentJob_returns404() {
+        assertThat(mockMvcTester.delete().uri("/api/jobs/no-such-job/skip-next"))
+                .hasStatus4xxClientError()
+                .hasStatus(404);
+    }
+
+    @Test
+    void cancelSkipNext_pausedJob_succeeds() throws Exception {
+        registerJobWithCronTrigger("paused-cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/paused-cron-job/skip-next"))
+                .hasStatusOk();
+        assertThat(skipNextStorage.exists("paused-cron-job")).isTrue();
+
+        scheduler.pauseJob(JobKey.jobKey("paused-cron-job"));
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/paused-cron-job/skip-next"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("skip-cancelled");
+
+        assertThat(skipNextStorage.exists("paused-cron-job")).isFalse();
+    }
+
+    // -- Skip-next status tests --
+
+    @Test
+    void getSkipNextStatus_skipFlagSet_returnsSkipPending() throws Exception {
+        registerJobWithCronTrigger("cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/cron-job/skip-next"))
+                .hasStatusOk();
+
+        assertThat(mockMvcTester.get().uri("/api/jobs/cron-job/skip-next"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("skip-pending");
+    }
+
+    @Test
+    void getSkipNextStatus_noSkipFlag_returnsSkipNotPending() throws Exception {
+        registerJobWithCronTrigger("fresh-cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.get().uri("/api/jobs/fresh-cron-job/skip-next"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("skip-not-pending");
+    }
+
+    @Test
+    void getSkipNextStatus_nonExistentJob_returns404() {
+        assertThat(mockMvcTester.get().uri("/api/jobs/no-such-job/skip-next"))
+                .hasStatus4xxClientError()
+                .hasStatus(404);
+    }
+
     // -- Skip-next trigger listener tests --
 
     @Test
@@ -474,11 +563,8 @@ class JobControllerTest {
         assertThat(mockMvcTester.post().uri("/api/jobs/veto-job/skip-next"))
                 .hasStatusOk();
 
-        // Poll until the skip flag is consumed (confirming the veto happened)
-        long deadline = System.currentTimeMillis() + 3000;
-        while (skipNextStorage.exists("veto-job") && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50);
-        }
+        // Wait for the skip flag to be consumed (confirming the veto happened)
+        await().atMost(3, SECONDS).until(() -> !skipNextStorage.exists("veto-job"));
 
         // Immediately pause to prevent the next cron firing from executing the job
         scheduler.pauseJob(JobKey.jobKey("veto-job"));
@@ -503,11 +589,7 @@ class JobControllerTest {
         assertThat(mockMvcTester.post().uri("/api/jobs/manual-ok/trigger"))
                 .hasStatusOk();
 
-        Thread.sleep(500);
-
-        assertThat(RecordingJob.executed.get())
-                .as("Manual trigger should not be vetoed")
-                .isTrue();
+        await().atMost(3, SECONDS).untilTrue(RecordingJob.executed);
         assertThat(skipNextStorage.exists("manual-ok"))
                 .as("Skip flag should still be present for next cron firing")
                 .isTrue();
@@ -521,17 +603,11 @@ class JobControllerTest {
         assertThat(mockMvcTester.post().uri("/api/jobs/resume-after-skip/skip-next"))
                 .hasStatusOk();
 
-        // Poll until the skip flag is consumed (first firing vetoed)
-        long deadline = System.currentTimeMillis() + 3000;
-        while (skipNextStorage.exists("resume-after-skip") && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50);
-        }
+        // Wait for the skip flag to be consumed (first firing vetoed)
+        await().atMost(3, SECONDS).until(() -> !skipNextStorage.exists("resume-after-skip"));
 
         // Wait for the next cron firing to execute normally
-        deadline = System.currentTimeMillis() + 3000;
-        while (!RecordingJob.executed.get() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(50);
-        }
+        await().atMost(3, SECONDS).untilTrue(RecordingJob.executed);
 
         scheduler.pauseJob(JobKey.jobKey("resume-after-skip"));
 

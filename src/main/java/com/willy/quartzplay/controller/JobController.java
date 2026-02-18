@@ -5,6 +5,7 @@ import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -52,5 +53,17 @@ public class JobController {
     public ResponseEntity<JobResponse> skipNext(@PathVariable String name) {
         jobManagementService.skipNextExecution(name);
         return ResponseEntity.ok(new JobResponse("skipped", name));
+    }
+
+    @DeleteMapping("/{name}/skip-next")
+    public ResponseEntity<JobResponse> cancelSkipNext(@PathVariable String name) {
+        jobManagementService.cancelSkipNext(name);
+        return ResponseEntity.ok(new JobResponse("skip-cancelled", name));
+    }
+
+    @GetMapping("/{name}/skip-next")
+    public ResponseEntity<JobResponse> getSkipNextStatus(@PathVariable String name) {
+        boolean pending = jobManagementService.isSkipNextPending(name);
+        return ResponseEntity.ok(new JobResponse(pending ? "skip-pending" : "skip-not-pending", name));
     }
 }

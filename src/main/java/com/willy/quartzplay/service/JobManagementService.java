@@ -163,6 +163,34 @@ public class JobManagementService {
     }
   }
 
+  public void cancelSkipNext(String jobName) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+
+      if (!skipNextStorage.exists(jobName)) {
+        log.info("No skip-next flag set for job: {}", jobName);
+        return;
+      }
+
+      skipNextStorage.delete(jobName);
+      log.info("Skip-next cancelled for job: {}", jobName);
+    } catch (SchedulerException e) {
+      throw new SkipNextException(jobName, e);
+    }
+  }
+
+  public boolean isSkipNextPending(String jobName) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+
+      return skipNextStorage.exists(jobName);
+    } catch (SchedulerException e) {
+      throw new SkipNextException(jobName, e);
+    }
+  }
+
   public void interruptJob(String jobName) {
     try {
       JobKey jobKey = JobKey.jobKey(jobName);
