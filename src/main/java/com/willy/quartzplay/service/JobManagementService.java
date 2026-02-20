@@ -2,17 +2,11 @@ package com.willy.quartzplay.service;
 
 import com.willy.quartzplay.controller.JobDetailResponse;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
-import com.willy.quartzplay.messaging.JobInterruptProducer;
-import com.willy.quartzplay.repository.FiredTriggerRepository;
+import com.willy.quartzplay.messaging.JobInterruptProducerAdapter;
+import com.willy.quartzplay.repository.FiredTriggerStorageAdapter;
+import com.willy.quartzplay.repository.FiredTriggerStorageAdapter.FiredTriggerInfo;
 import com.willy.quartzplay.repository.SkipNextStorageAdapter;
-import com.willy.quartzplay.repository.QrtzFiredTrigger;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-import java.util.Set;
 import org.quartz.*;
-import org.quartz.UnableToInterruptJobException;
 import org.quartz.impl.matchers.GroupMatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,21 +14,28 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
+import java.time.Instant;
+import java.util.*;
+
 @Service
 public class JobManagementService {
 
   private static final Logger log = LoggerFactory.getLogger(JobManagementService.class);
   private final Scheduler scheduler;
-  private final FiredTriggerRepository firedTriggerRepository;
-  private final JobInterruptProducer jobInterruptProducer;
+  private final FiredTriggerStorageAdapter firedTriggerStorage;
+  private final JobInterruptProducerAdapter jobInterruptProducer;
   private final SkipNextStorageAdapter skipNextStorage;
 
-  public JobManagementService(Scheduler scheduler, FiredTriggerRepository firedTriggerRepository,
-                              JobInterruptProducer jobInterruptProducer, SkipNextStorageAdapter skipNextStorage) {
+  public JobManagementService(Scheduler scheduler, FiredTriggerStorageAdapter firedTriggerStorage,
+                              JobInterruptProducerAdapter jobInterruptProducer, SkipNextStorageAdapter skipNextStorage) {
     this.scheduler = scheduler;
-    this.firedTriggerRepository = firedTriggerRepository;
+    this.firedTriggerStorage = firedTriggerStorage;
     this.jobInterruptProducer = jobInterruptProducer;
     this.skipNextStorage = skipNextStorage;
+  }
+
+  private static Instant toInstant(Date date) {
+    return date != null ? date.toInstant() : null;
   }
 
   public List<JobDetailResponse> listJobs() {
@@ -84,10 +85,6 @@ public class JobManagementService {
     }
   }
 
-  private static Instant toInstant(Date date) {
-    return date != null ? date.toInstant() : null;
-  }
-
   public void triggerJob(String jobName) {
     try {
       JobKey jobKey = JobKey.jobKey(jobName);
@@ -126,6 +123,47 @@ public class JobManagementService {
       scheduler.resumeJob(jobKey);
     } catch (SchedulerException e) {
       throw new JobResumeException(jobName, e);
+    }
+  }
+
+  public void rescheduleJob(String jobName, String cronExpression) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+
+      List<CronTrigger> cronTriggers = scheduler.getTriggersOfJob(jobKey).stream()
+          .filter(CronTrigger.class::isInstance)
+          .map(CronTrigger.class::cast)
+          .toList();
+
+      if (cronTriggers.isEmpty()) {
+        throw new NoCronTriggersException(jobName);
+      }
+
+      if (!CronExpression.isValidExpression(cronExpression)) {
+        throw new InvalidCronExpressionException(cronExpression);
+      }
+
+      for (CronTrigger ct : cronTriggers) {
+        boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
+
+        Trigger newTrigger = TriggerBuilder.newTrigger()
+            .withIdentity(ct.getKey())
+            .forJob(jobKey)
+            .withSchedule(CronScheduleBuilder.cronSchedule(cronExpression)
+                .withMisfireHandlingInstructionDoNothing())
+            .build();
+
+        scheduler.rescheduleJob(ct.getKey(), newTrigger);
+
+        if (wasPaused) {
+          scheduler.pauseTrigger(ct.getKey());
+        }
+      }
+
+      log.info("Rescheduled job: {} with cron: {}", jobName, cronExpression);
+    } catch (SchedulerException e) {
+      throw new RescheduleException(jobName, e);
     }
   }
 
@@ -180,6 +218,21 @@ public class JobManagementService {
     }
   }
 
+  public void deleteJob(String jobName) {
+    try {
+      JobKey jobKey = JobKey.jobKey(jobName);
+      requireJobExists(jobKey);
+      requireJobNotRunning(jobKey);
+      requireJobNotRunningOnAnyNode(jobKey);
+
+      scheduler.deleteJob(jobKey);
+      skipNextStorage.delete(jobName);
+      log.info("Deleted job: {}", jobName);
+    } catch (SchedulerException e) {
+      throw new JobDeleteException(jobName, e);
+    }
+  }
+
   public boolean isSkipNextPending(String jobName) {
     try {
       JobKey jobKey = JobKey.jobKey(jobName);
@@ -191,42 +244,67 @@ public class JobManagementService {
     }
   }
 
+  // Interruption is cooperative: the job must implement InterruptableJob and check for a
+  // thread-safe flag (e.g. a volatile boolean or AtomicBoolean) in its execution loop.
+  // Calling interrupt() simply sets that flag — it does not forcibly stop the thread.
+  //
+  // Quartz's Scheduler.interrupt() only acts on the local node — in a clustered setup the job
+  // may be running on a different instance. We broadcast the interrupt over Kafka so every node
+  // receives it, and the one actually executing the job can act on it.
   public void interruptJob(String jobName) {
     try {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
+      requireInterruptable(jobKey);
 
-      QrtzFiredTrigger trigger = firedTriggerRepository
-          .findFirstBySchedNameAndJobNameAndJobGroupAndState(
-              scheduler.getSchedulerName(), jobKey.getName(), jobKey.getGroup(), "EXECUTING")
+      FiredTriggerInfo trigger = firedTriggerStorage
+          .findExecutingTrigger(
+              scheduler.getSchedulerName(),
+              jobKey.getName(),
+              jobKey.getGroup()
+          )
           .orElseThrow(() -> new JobNotRunningException(jobName));
 
       // Broadcast interrupt via Kafka (all nodes will receive)
-      jobInterruptProducer.sendInterrupt(jobName, jobKey.getGroup(), trigger.getEntryId());
+      jobInterruptProducer.sendInterrupt(jobName, jobKey.getGroup(), trigger.fireInstanceId());
 
       // Optimization: if running on this node, interrupt locally for instant effect
-      if (trigger.getInstanceName().equals(scheduler.getSchedulerInstanceId())) {
-        interruptLocalExecution(jobKey, trigger.getEntryId());
+      if (trigger.instanceName().equals(scheduler.getSchedulerInstanceId())) {
+        interruptLocalExecution(jobKey, trigger.fireInstanceId());
       }
 
-      log.info("Interrupt sent for job: {} (fireId={})", jobName, trigger.getEntryId());
+      log.info("Interrupt sent for job: {} (fireId={})", jobName, trigger.fireInstanceId());
     } catch (SchedulerException e) {
       throw new JobInterruptException(jobName, e);
     }
   }
 
-  private void interruptLocalExecution(JobKey jobKey, String fireInstanceId) throws SchedulerException {
-    for (JobExecutionContext ctx : scheduler.getCurrentlyExecutingJobs()) {
-      if (ctx.getJobDetail().getKey().equals(jobKey)
-              && ctx.getFireInstanceId().equals(fireInstanceId)) {
-        try {
-          ((InterruptableJob) ctx.getJobInstance()).interrupt();
-        } catch (UnableToInterruptJobException e) {
-          log.warn("Local interrupt failed, Kafka message will handle it", e);
-        }
-        return;
-      }
+  public void interruptLocalExecution(JobKey jobKey, String fireInstanceId) throws SchedulerException {
+    var ctx = findExecutionContext(jobKey, fireInstanceId);
+
+    if (ctx.isEmpty()) {
+      return;
     }
+
+    if (!(ctx.get().getJobInstance() instanceof InterruptableJob interruptable)) {
+      log.warn("Job [{}] does not implement InterruptableJob, cannot interrupt", jobKey);
+      return;
+    }
+
+    try {
+      interruptable.interrupt();
+      log.info("Interrupted job locally: {} (fireId={})", jobKey, fireInstanceId);
+    } catch (UnableToInterruptJobException e) {
+      log.warn("Local interrupt failed for job: {} (fireId={})", jobKey, fireInstanceId, e);
+    }
+  }
+
+  private Optional<JobExecutionContext> findExecutionContext(JobKey jobKey, String fireInstanceId)
+      throws SchedulerException {
+    return scheduler.getCurrentlyExecutingJobs().stream()
+        .filter(ctx -> ctx.getJobDetail().getKey().equals(jobKey)
+            && ctx.getFireInstanceId().equals(fireInstanceId))
+        .findFirst();
   }
 
   private boolean isAlreadyRunning(JobKey jobKey) throws SchedulerException {
@@ -243,10 +321,25 @@ public class JobManagementService {
     }
   }
 
+  private void requireInterruptable(JobKey jobKey) throws SchedulerException {
+    Class<? extends Job> jobClass = scheduler.getJobDetail(jobKey).getJobClass();
+    if (!InterruptableJob.class.isAssignableFrom(jobClass)) {
+      throw new JobNotInterruptableException(jobKey.getName());
+    }
+  }
+
   private void requireJobNotRunning(JobKey jobKey) throws SchedulerException {
     if (isAlreadyRunning(jobKey)) {
       throw new JobAlreadyRunningException(jobKey.getName());
     }
+  }
+
+  // Checks the QRTZ_FIRED_TRIGGERS table, which covers all nodes in a cluster.
+  // requireJobNotRunning only checks local execution via getCurrentlyExecutingJobs().
+  private void requireJobNotRunningOnAnyNode(JobKey jobKey) throws SchedulerException {
+    firedTriggerStorage.findExecutingTrigger(
+        scheduler.getSchedulerName(), jobKey.getName(), jobKey.getGroup()
+    ).ifPresent(_ -> { throw new JobAlreadyRunningException(jobKey.getName()); });
   }
 
   @ResponseStatus(HttpStatus.NOT_FOUND)
@@ -298,6 +391,13 @@ public class JobManagementService {
     }
   }
 
+  @ResponseStatus(HttpStatus.CONFLICT)
+  public static class JobNotInterruptableException extends RuntimeException {
+    public JobNotInterruptableException(String jobName) {
+      super("Job does not support interruption: " + jobName);
+    }
+  }
+
   @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobInterruptException extends RuntimeException {
     public JobInterruptException(String jobName, Throwable cause) {
@@ -323,6 +423,27 @@ public class JobManagementService {
   public static class SkipNextException extends RuntimeException {
     public SkipNextException(String jobName, Throwable cause) {
       super("Failed to set skip-next for job: " + jobName, cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  public static class InvalidCronExpressionException extends RuntimeException {
+    public InvalidCronExpressionException(String cronExpression) {
+      super("Invalid cron expression: " + cronExpression);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class RescheduleException extends RuntimeException {
+    public RescheduleException(String jobName, Throwable cause) {
+      super("Failed to reschedule job: " + jobName, cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class JobDeleteException extends RuntimeException {
+    public JobDeleteException(String jobName, Throwable cause) {
+      super("Failed to delete job: " + jobName, cause);
     }
   }
 }

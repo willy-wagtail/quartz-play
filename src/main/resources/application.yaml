@@ -29,7 +29,7 @@ spring:
     job-store-type: jdbc
     jdbc:
       initialize-schema: never
-    overwrite-existing-jobs: true # Needed when using a persistent DB (e.g. PostgreSQL)
+    overwrite-existing-jobs: false
     properties:
       org.quartz.jobStore.isClustered: true
       org.quartz.scheduler.instanceId: AUTO

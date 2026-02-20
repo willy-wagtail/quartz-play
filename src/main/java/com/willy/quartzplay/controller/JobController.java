@@ -7,9 +7,18 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+// Spring Boot Actuator Quartz endpoints (expose via management.endpoints.web.exposure.include=quartz):
+//   GET /actuator/quartz                          — summary of job and trigger counts per group
+//   GET /actuator/quartz/jobs                     — all job groups and their job names
+//   GET /actuator/quartz/jobs/{group}             — job names within a group
+//   GET /actuator/quartz/jobs/{group}/{name}      — detail for a single job (class, triggers, data map)
+//   GET /actuator/quartz/triggers                 — all trigger groups and their trigger names
+//   GET /actuator/quartz/triggers/{group}         — trigger names within a group
+//   GET /actuator/quartz/triggers/{group}/{name}  — detail for a single trigger (schedule, state, fire times)
 @RestController
 @RequestMapping("/api/jobs")
 public class JobController {
@@ -49,6 +58,13 @@ public class JobController {
         return ResponseEntity.ok(new JobResponse("interrupted", name));
     }
 
+    @PostMapping("/{name}/reschedule")
+    public ResponseEntity<JobResponse> reschedule(@PathVariable String name,
+                                                  @RequestBody RescheduleRequest request) {
+        jobManagementService.rescheduleJob(name, request.cronExpression());
+        return ResponseEntity.ok(new JobResponse("rescheduled", name));
+    }
+
     @PostMapping("/{name}/skip-next")
     public ResponseEntity<JobResponse> skipNext(@PathVariable String name) {
         jobManagementService.skipNextExecution(name);
@@ -59,6 +75,12 @@ public class JobController {
     public ResponseEntity<JobResponse> cancelSkipNext(@PathVariable String name) {
         jobManagementService.cancelSkipNext(name);
         return ResponseEntity.ok(new JobResponse("skip-cancelled", name));
+    }
+
+    @DeleteMapping("/{name}")
+    public ResponseEntity<JobResponse> delete(@PathVariable String name) {
+        jobManagementService.deleteJob(name);
+        return ResponseEntity.ok(new JobResponse("deleted", name));
     }
 
     @GetMapping("/{name}/skip-next")

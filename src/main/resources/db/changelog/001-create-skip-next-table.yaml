@@ -7,8 +7,9 @@ databaseChangeLog:
         A row present means skip-next is pending. SkipNextTriggerListener
         checks this table on every cron firing — if a row exists, it vetoes
         the execution and deletes the row so subsequent firings proceed normally.
-        This table is decoupled from Quartz's schema because
-        overwrite-existing-jobs=true wipes trigger/JobDataMap state on restart.
+        This table is separate from Quartz's JobDataMap by design: skip-next is
+        application behavior (a toggle flag), not scheduling metadata. A dedicated
+        table gives simple INSERT/DELETE semantics vs re-serializing the entire map.
       changes:
         - createTable:
             tableName: SKIP_NEXT

@@ -6,8 +6,14 @@ import static org.awaitility.Awaitility.await;
 
 import com.willy.quartzplay.listener.SkipNextTriggerListener;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
+import com.willy.quartzplay.messaging.InterruptJobCommand;
+import com.willy.quartzplay.messaging.JobInterruptProducerAdapter;
+import com.willy.quartzplay.repository.FiredTriggerStorageAdapter;
+import com.willy.quartzplay.repository.FiredTriggerStorageAdapter.FiredTriggerInfo;
 import com.willy.quartzplay.repository.SkipNextStorageAdapter;
 import com.willy.quartzplay.service.JobManagementService;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -23,7 +29,9 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Bean;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
+import tools.jackson.databind.ObjectMapper;
 
 @WebMvcTest(JobController.class)
 @ExtendWith(OutputCaptureExtension.class)
@@ -32,11 +40,18 @@ class JobControllerTest {
     @Autowired MockMvcTester mockMvcTester;
     @Autowired Scheduler scheduler;
     @Autowired SkipNextStorageAdapter skipNextStorage;
+    @Autowired List<FiredTriggerInfo> firedTriggers;
+    @Autowired List<String> sentMessages;
+    @Autowired ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() throws Exception {
         scheduler.clear();
+        firedTriggers.clear();
+        sentMessages.clear();
         RecordingJob.reset();
+        BlockingInterruptableJob.reset();
+        FailingInterruptableJob.reset();
     }
 
     @TestConfiguration
@@ -60,8 +75,31 @@ class JobControllerTest {
         }
 
         @Bean
-        JobManagementService jobManagementService(Scheduler scheduler, SkipNextStorageAdapter skipNextStorage) {
-            return new JobManagementService(scheduler, null, null, skipNextStorage);
+        List<FiredTriggerInfo> firedTriggers() {
+            return new ArrayList<>();
+        }
+
+        @Bean
+        FiredTriggerStorageAdapter firedTriggerStorage(List<FiredTriggerInfo> firedTriggers) {
+            return FiredTriggerStorageAdapter.createNull(firedTriggers);
+        }
+
+        @Bean
+        List<String> sentMessages() {
+            return new ArrayList<>();
+        }
+
+        @Bean
+        JobInterruptProducerAdapter jobInterruptProducerAdapter(ObjectMapper objectMapper,
+                                                                 List<String> sentMessages) {
+            return JobInterruptProducerAdapter.createNull(objectMapper, sentMessages);
+        }
+
+        @Bean
+        JobManagementService jobManagementService(Scheduler scheduler, SkipNextStorageAdapter skipNextStorage,
+                                                  FiredTriggerStorageAdapter firedTriggerStorage,
+                                                  JobInterruptProducerAdapter jobInterruptProducerAdapter) {
+            return new JobManagementService(scheduler, firedTriggerStorage, jobInterruptProducerAdapter, skipNextStorage);
         }
     }
 
@@ -71,6 +109,62 @@ class JobControllerTest {
         @Override
         public void execute(JobExecutionContext context) {
             // no-op
+        }
+    }
+
+    // BlockingJob that implements InterruptableJob, allowing interrupt tests to verify the full flow.
+    public static class BlockingInterruptableJob implements InterruptableJob {
+        private static CountDownLatch started = new CountDownLatch(1);
+        private static CountDownLatch release = new CountDownLatch(1);
+        private static final AtomicBoolean interrupted = new AtomicBoolean(false);
+
+        static void reset() {
+            started = new CountDownLatch(1);
+            release = new CountDownLatch(1);
+            interrupted.set(false);
+        }
+
+        @Override
+        public void execute(JobExecutionContext context) {
+            started.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        @Override
+        public void interrupt() {
+            interrupted.set(true);
+            release.countDown();
+        }
+    }
+
+    // BlockingInterruptableJob whose interrupt() always throws, for testing exception handling.
+    public static class FailingInterruptableJob implements InterruptableJob {
+        private static CountDownLatch started = new CountDownLatch(1);
+        private static CountDownLatch release = new CountDownLatch(1);
+
+        static void reset() {
+            started = new CountDownLatch(1);
+            release = new CountDownLatch(1);
+        }
+
+        @Override
+        public void execute(JobExecutionContext context) {
+            started.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        @Override
+        public void interrupt() throws UnableToInterruptJobException {
+            release.countDown();
+            throw new UnableToInterruptJobException("Simulated interrupt failure");
         }
     }
 
@@ -186,7 +280,6 @@ class JobControllerTest {
     @Test
     void triggerJob_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/trigger"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -206,7 +299,6 @@ class JobControllerTest {
 
         // Second trigger while still running → 409
         assertThat(mockMvcTester.post().uri("/api/jobs/blocking-job/trigger"))
-                .hasStatus4xxClientError()
                 .hasStatus(409);
 
         // Release the blocking job so the scheduler thread can clean up
@@ -277,7 +369,6 @@ class JobControllerTest {
     @Test
     void pauseJob_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/pause"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -403,7 +494,6 @@ class JobControllerTest {
     @Test
     void resumeJob_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/resume"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -424,7 +514,6 @@ class JobControllerTest {
     @Test
     void skipNext_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -434,7 +523,6 @@ class JobControllerTest {
         scheduler.pauseJob(JobKey.jobKey("paused-cron-job"));
 
         assertThat(mockMvcTester.post().uri("/api/jobs/paused-cron-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(409);
     }
 
@@ -443,7 +531,6 @@ class JobControllerTest {
         registerJob("durable-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/durable-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(409);
     }
 
@@ -452,7 +539,6 @@ class JobControllerTest {
         registerJobWithSimpleTrigger("simple-trigger-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/simple-trigger-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(409);
     }
 
@@ -499,7 +585,6 @@ class JobControllerTest {
     @Test
     void cancelSkipNext_nonExistentJob_returns404() {
         assertThat(mockMvcTester.delete().uri("/api/jobs/no-such-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -549,7 +634,6 @@ class JobControllerTest {
     @Test
     void getSkipNextStatus_nonExistentJob_returns404() {
         assertThat(mockMvcTester.get().uri("/api/jobs/no-such-job/skip-next"))
-                .hasStatus4xxClientError()
                 .hasStatus(404);
     }
 
@@ -593,6 +677,286 @@ class JobControllerTest {
         assertThat(skipNextStorage.exists("manual-ok"))
                 .as("Skip flag should still be present for next cron firing")
                 .isTrue();
+    }
+
+    // -- Interrupt tests --
+
+    @Test
+    void interrupt_nonInterruptableJob_returns409() throws Exception {
+        registerJob("non-interruptable", NullJob.class);
+
+        var result = mockMvcTester.post().uri("/api/jobs/non-interruptable/interrupt").exchange();
+
+        assertThat(result)
+                .hasStatus(409);
+        assertThat(result.getMvcResult().getResolvedException())
+                .hasMessage("Job does not support interruption: non-interruptable");
+    }
+
+    @Test
+    void interrupt_runningInterruptableJob_returnsOk() throws Exception {
+        BlockingInterruptableJob.reset();
+        registerJobWithImmediateTrigger("interruptable-job", BlockingInterruptableJob.class);
+
+        assertThat(BlockingInterruptableJob.started.await(5, TimeUnit.SECONDS))
+                .as("BlockingInterruptableJob should have started")
+                .isTrue();
+
+        // Get the fire instance ID from the currently executing job
+        String fireInstanceId = scheduler.getCurrentlyExecutingJobs().stream()
+                .filter(ctx -> ctx.getJobDetail().getKey().getName().equals("interruptable-job"))
+                .findFirst()
+                .map(JobExecutionContext::getFireInstanceId)
+                .orElseThrow();
+
+        // Seed the fired triggers list with an entry matching this node
+        firedTriggers.add(new FiredTriggerInfo(
+                scheduler.getSchedulerName(), fireInstanceId,
+                scheduler.getSchedulerInstanceId(),
+                "interruptable-job", "DEFAULT", "EXECUTING"));
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/interruptable-job/interrupt"))
+                .hasStatusOk();
+
+        await().atMost(5, SECONDS).untilTrue(BlockingInterruptableJob.interrupted);
+
+        assertThat(sentMessages).hasSize(1);
+        var sent = objectMapper.readValue(sentMessages.getFirst(), InterruptJobCommand.class);
+        assertThat(sent).isEqualTo(new InterruptJobCommand("interruptable-job", "DEFAULT", fireInstanceId));
+    }
+
+    @Test
+    void interrupt_nonExistentJob_returns404() {
+        assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/interrupt"))
+                .hasStatus(404);
+    }
+
+    @Test
+    void interrupt_interruptableJobNotRunning_returns409() throws Exception {
+        registerJob("idle-interruptable", BlockingInterruptableJob.class);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/idle-interruptable/interrupt"))
+                .hasStatus(409);
+    }
+
+    @Test
+    void interrupt_jobOnDifferentNode_sendsKafkaButSkipsLocalInterrupt() throws Exception {
+        BlockingInterruptableJob.reset();
+        registerJobWithImmediateTrigger("remote-job", BlockingInterruptableJob.class);
+
+        assertThat(BlockingInterruptableJob.started.await(5, TimeUnit.SECONDS))
+                .as("BlockingInterruptableJob should have started")
+                .isTrue();
+
+        String fireInstanceId = scheduler.getCurrentlyExecutingJobs().stream()
+                .filter(ctx -> ctx.getJobDetail().getKey().getName().equals("remote-job"))
+                .findFirst()
+                .map(JobExecutionContext::getFireInstanceId)
+                .orElseThrow();
+
+        // Seed fired trigger with a different instance name to simulate a remote node
+        firedTriggers.add(new FiredTriggerInfo(
+                scheduler.getSchedulerName(), fireInstanceId,
+                "different-node-instance",
+                "remote-job", "DEFAULT", "EXECUTING"));
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/remote-job/interrupt"))
+                .hasStatusOk();
+
+        assertThat(sentMessages).hasSize(1);
+        var sent = objectMapper.readValue(sentMessages.getFirst(), InterruptJobCommand.class);
+        assertThat(sent).isEqualTo(new InterruptJobCommand("remote-job", "DEFAULT", fireInstanceId));
+
+        // Local interrupt should NOT have been called since the trigger is on a different node
+        assertThat(BlockingInterruptableJob.interrupted.get())
+                .as("Job should not be interrupted locally when running on a different node")
+                .isFalse();
+
+        BlockingInterruptableJob.release.countDown();
+    }
+
+    @Test
+    void interrupt_interruptThrowsException_returnsOkAndLogsWarning(CapturedOutput output) throws Exception {
+        FailingInterruptableJob.reset();
+        registerJobWithImmediateTrigger("failing-interrupt-job", FailingInterruptableJob.class);
+
+        assertThat(FailingInterruptableJob.started.await(5, TimeUnit.SECONDS))
+                .as("FailingInterruptableJob should have started")
+                .isTrue();
+
+        String fireInstanceId = scheduler.getCurrentlyExecutingJobs().stream()
+                .filter(ctx -> ctx.getJobDetail().getKey().getName().equals("failing-interrupt-job"))
+                .findFirst()
+                .map(JobExecutionContext::getFireInstanceId)
+                .orElseThrow();
+
+        firedTriggers.add(new FiredTriggerInfo(
+                scheduler.getSchedulerName(), fireInstanceId,
+                scheduler.getSchedulerInstanceId(),
+                "failing-interrupt-job", "DEFAULT", "EXECUTING"));
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/failing-interrupt-job/interrupt"))
+                .hasStatusOk();
+
+        await().atMost(5, SECONDS).until(() -> scheduler.getCurrentlyExecutingJobs().isEmpty());
+
+        assertThat(output).contains("Local interrupt failed for job");
+    }
+
+    // -- Delete tests --
+
+    @Test
+    void deleteJob_existingIdleJob_succeeds() throws Exception {
+        registerJob("deletable-job", NullJob.class);
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/deletable-job"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("deleted");
+
+        assertThat(scheduler.checkExists(JobKey.jobKey("deletable-job"))).isFalse();
+    }
+
+    @Test
+    void deleteJob_jobWithTriggers_removesJobAndTriggers() throws Exception {
+        registerJobWithSimpleTrigger("triggered-job", NullJob.class);
+
+        assertThat(scheduler.checkExists(TriggerKey.triggerKey("triggered-job-trigger"))).isTrue();
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/triggered-job"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("deleted");
+
+        assertThat(scheduler.checkExists(JobKey.jobKey("triggered-job"))).isFalse();
+        assertThat(scheduler.checkExists(TriggerKey.triggerKey("triggered-job-trigger"))).isFalse();
+    }
+
+    @Test
+    void deleteJob_nonExistentJob_returns404() {
+        assertThat(mockMvcTester.delete().uri("/api/jobs/no-such-job"))
+                .hasStatus(404);
+    }
+
+    @Test
+    void deleteJob_currentlyRunningJob_returns409() throws Exception {
+        BlockingJob.reset();
+        registerJob("running-delete-job", BlockingJob.class);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/running-delete-job/trigger"))
+                .hasStatusOk();
+        assertThat(BlockingJob.started.await(5, TimeUnit.SECONDS))
+                .as("BlockingJob should have started")
+                .isTrue();
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/running-delete-job"))
+                .hasStatus(409);
+
+        assertThat(scheduler.checkExists(JobKey.jobKey("running-delete-job")))
+                .as("Job should still exist after rejected delete")
+                .isTrue();
+
+        BlockingJob.release.countDown();
+    }
+
+    @Test
+    void deleteJob_runningOnRemoteNode_returns409() throws Exception {
+        registerJob("remote-running-job", NullJob.class);
+
+        // Simulate job executing on a different cluster node
+        firedTriggers.add(new FiredTriggerInfo(
+                "TestScheduler", "fire-123",
+                "different-node",
+                "remote-running-job", "DEFAULT", "EXECUTING"));
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/remote-running-job"))
+                .hasStatus(409);
+
+        assertThat(scheduler.checkExists(JobKey.jobKey("remote-running-job")))
+                .as("Job should still exist after rejected delete")
+                .isTrue();
+    }
+
+    @Test
+    void deleteJob_jobWithSkipNextFlag_cleansUpFlag() throws Exception {
+        registerJobWithCronTrigger("skip-delete-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/skip-delete-job/skip-next"))
+                .hasStatusOk();
+        assertThat(skipNextStorage.exists("skip-delete-job")).isTrue();
+
+        assertThat(mockMvcTester.delete().uri("/api/jobs/skip-delete-job"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("deleted");
+
+        assertThat(scheduler.checkExists(JobKey.jobKey("skip-delete-job"))).isFalse();
+        assertThat(skipNextStorage.exists("skip-delete-job")).isFalse();
+    }
+
+    // -- Reschedule tests --
+
+    @Test
+    void reschedule_validCron_updatesTrigger() throws Exception {
+        registerJobWithCronTrigger("resched-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/resched-job/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("status").asString().isEqualTo("rescheduled");
+
+        Trigger updated = scheduler.getTrigger(TriggerKey.triggerKey("resched-job-trigger"));
+        assertThat(updated).isInstanceOf(CronTrigger.class);
+        assertThat(((CronTrigger) updated).getCronExpression()).isEqualTo("0 30 * * * ?");
+    }
+
+    @Test
+    void reschedule_preservesPausedState() throws Exception {
+        registerJobWithCronTrigger("paused-resched", NullJob.class, "0 0 0 * * ?");
+        scheduler.pauseJob(JobKey.jobKey("paused-resched"));
+
+        assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("paused-resched-trigger")))
+                .isEqualTo(Trigger.TriggerState.PAUSED);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/paused-resched/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .hasStatusOk();
+
+        assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("paused-resched-trigger")))
+                .isEqualTo(Trigger.TriggerState.PAUSED);
+        assertThat(((CronTrigger) scheduler.getTrigger(TriggerKey.triggerKey("paused-resched-trigger")))
+                .getCronExpression()).isEqualTo("0 30 * * * ?");
+    }
+
+    @Test
+    void reschedule_nonExistentJob_returns404() {
+        assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .hasStatus(404);
+    }
+
+    @Test
+    void reschedule_jobWithNoCronTrigger_returns409() throws Exception {
+        registerJob("durable-only", NullJob.class);
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/durable-only/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .hasStatus(409);
+    }
+
+    @Test
+    void reschedule_invalidCronExpression_returns400() throws Exception {
+        registerJobWithCronTrigger("bad-cron-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/bad-cron-job/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"not-a-cron\"}"))
+                .hasStatus(400);
     }
 
     @Test
