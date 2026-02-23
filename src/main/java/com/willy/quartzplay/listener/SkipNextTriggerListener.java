@@ -45,7 +45,8 @@ public class SkipNextTriggerListener implements TriggerListener {
 
     @Override
     public void triggerMisfired(Trigger trigger) {
-        // no-op
+        String jobName = trigger.getJobKey().getName();
+        log.warn("{}: Trigger misfired (scheduled fire time: {})", jobName, trigger.getNextFireTime());
     }
 
     @Override

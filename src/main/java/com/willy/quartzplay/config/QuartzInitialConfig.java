@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.quartz.*;
 import org.quartz.impl.matchers.GroupMatcher;
+import org.quartz.listeners.SchedulerListenerSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationRunner;
@@ -62,6 +63,18 @@ public class QuartzInitialConfig {
     return schedulerFactoryBean -> {
       schedulerFactoryBean.setGlobalJobListeners(new TriggerOriginJobListener());
       schedulerFactoryBean.setGlobalTriggerListeners(new SkipNextTriggerListener(skipNextStorage));
+      schedulerFactoryBean.setSchedulerListeners(new SchedulerListenerSupport() {
+        @Override
+        public void jobAdded(JobDetail jobDetail) {
+          log.info("Seeded new job: {}", jobDetail.getKey().getName());
+        }
+
+        @Override
+        public void jobScheduled(Trigger trigger) {
+          log.info("Seeded new trigger: {} for job: {}", trigger.getKey().getName(),
+              trigger.getJobKey().getName());
+        }
+      });
     };
   }
 

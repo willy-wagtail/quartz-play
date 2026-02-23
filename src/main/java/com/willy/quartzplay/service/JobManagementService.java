@@ -121,6 +121,7 @@ public class JobManagementService {
 
       log.info("Resuming job: {}", jobName);
       scheduler.resumeJob(jobKey);
+      logNextFireTime(jobKey);
     } catch (SchedulerException e) {
       throw new JobResumeException(jobName, e);
     }
@@ -131,37 +132,30 @@ public class JobManagementService {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
 
-      List<CronTrigger> cronTriggers = scheduler.getTriggersOfJob(jobKey).stream()
-          .filter(CronTrigger.class::isInstance)
-          .map(CronTrigger.class::cast)
-          .toList();
-
-      if (cronTriggers.isEmpty()) {
-        throw new NoCronTriggersException(jobName);
-      }
-
       if (!CronExpression.isValidExpression(cronExpression)) {
         throw new InvalidCronExpressionException(cronExpression);
       }
 
-      for (CronTrigger ct : cronTriggers) {
-        boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
+      requireExactlyOneCronTrigger(jobKey);
 
-        Trigger newTrigger = TriggerBuilder.newTrigger()
-            .withIdentity(ct.getKey())
-            .forJob(jobKey)
-            .withSchedule(CronScheduleBuilder.cronSchedule(cronExpression)
-                .withMisfireHandlingInstructionDoNothing())
-            .build();
+      CronTrigger ct = getCronTriggers(jobKey).getFirst();
+      boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
 
-        scheduler.rescheduleJob(ct.getKey(), newTrigger);
+      Trigger newTrigger = TriggerBuilder.newTrigger()
+          .withIdentity(ct.getKey())
+          .forJob(jobKey)
+          .withSchedule(CronScheduleBuilder.cronSchedule(cronExpression)
+              .withMisfireHandlingInstructionDoNothing())
+          .build();
 
-        if (wasPaused) {
-          scheduler.pauseTrigger(ct.getKey());
-        }
+      scheduler.rescheduleJob(ct.getKey(), newTrigger);
+
+      if (wasPaused) {
+        scheduler.pauseTrigger(ct.getKey());
       }
 
       log.info("Rescheduled job: {} with cron: {}", jobName, cronExpression);
+      logNextFireTime(jobKey);
     } catch (SchedulerException e) {
       throw new RescheduleException(jobName, e);
     }
@@ -174,19 +168,23 @@ public class JobManagementService {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
 
-      List<CronTrigger> cronTriggers = scheduler.getTriggersOfJob(jobKey).stream()
-          .filter(CronTrigger.class::isInstance)
-          .map(CronTrigger.class::cast)
-          .toList();
+      List<CronTrigger> cronTriggers = getCronTriggers(jobKey);
 
       if (cronTriggers.isEmpty()) {
         throw new NoCronTriggersException(jobName);
       }
 
-      for (CronTrigger ct : cronTriggers) {
-        if (scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED) {
-          throw new JobPausedException(jobName);
-        }
+      boolean allPaused = cronTriggers.stream()
+          .allMatch(ct -> {
+            try {
+              return scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
+            } catch (SchedulerException e) {
+              throw new SkipNextException(jobName, e);
+            }
+          });
+
+      if (allPaused) {
+        throw new JobPausedException(jobName);
       }
 
       if (skipNextStorage.exists(jobName)) {
@@ -307,6 +305,14 @@ public class JobManagementService {
         .findFirst();
   }
 
+  private void logNextFireTime(JobKey jobKey) throws SchedulerException {
+    scheduler
+        .getTriggersOfJob(jobKey).stream()
+        .filter(t -> t.getNextFireTime() != null)
+        .findFirst()
+        .ifPresent(t -> log.info("{}: Next fire time: {}", jobKey.getName(), t.getNextFireTime().toInstant()));
+  }
+
   private boolean isAlreadyRunning(JobKey jobKey) throws SchedulerException {
     return scheduler
         .getCurrentlyExecutingJobs()
@@ -328,6 +334,28 @@ public class JobManagementService {
     }
   }
 
+  private List<CronTrigger> getCronTriggers(JobKey jobKey) throws SchedulerException {
+    return scheduler
+        .getTriggersOfJob(jobKey).stream()
+        .filter(CronTrigger.class::isInstance)
+        .map(CronTrigger.class::cast)
+        .toList();
+  }
+
+  private void requireExactlyOneCronTrigger(JobKey jobKey) throws SchedulerException {
+    long count = scheduler
+        .getTriggersOfJob(jobKey).stream()
+        .filter(CronTrigger.class::isInstance)
+        .count();
+
+    if (count == 0) {
+      throw new NoCronTriggersException(jobKey.getName());
+    }
+    if (count > 1) {
+      throw new MultipleCronTriggersException(jobKey.getName());
+    }
+  }
+
   private void requireJobNotRunning(JobKey jobKey) throws SchedulerException {
     if (isAlreadyRunning(jobKey)) {
       throw new JobAlreadyRunningException(jobKey.getName());
@@ -339,7 +367,9 @@ public class JobManagementService {
   private void requireJobNotRunningOnAnyNode(JobKey jobKey) throws SchedulerException {
     firedTriggerStorage.findExecutingTrigger(
         scheduler.getSchedulerName(), jobKey.getName(), jobKey.getGroup()
-    ).ifPresent(_ -> { throw new JobAlreadyRunningException(jobKey.getName()); });
+    ).ifPresent(_ -> {
+      throw new JobAlreadyRunningException(jobKey.getName());
+    });
   }
 
   @ResponseStatus(HttpStatus.NOT_FOUND)
@@ -416,6 +446,13 @@ public class JobManagementService {
   public static class NoCronTriggersException extends RuntimeException {
     public NoCronTriggersException(String jobName) {
       super("Job has no cron triggers: " + jobName);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.CONFLICT)
+  public static class MultipleCronTriggersException extends RuntimeException {
+    public MultipleCronTriggersException(String jobName) {
+      super("Job has multiple cron triggers (expected exactly one): " + jobName);
     }
   }
 

@@ -18,6 +18,7 @@ import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -50,6 +51,7 @@ class JobControllerTest {
         firedTriggers.clear();
         sentMessages.clear();
         RecordingJob.reset();
+        CountingJob.reset();
         BlockingInterruptableJob.reset();
         FailingInterruptableJob.reset();
     }
@@ -202,6 +204,17 @@ class JobControllerTest {
         @Override
         public void execute(JobExecutionContext context) {
             executed.set(true);
+        }
+    }
+
+    public static class CountingJob implements Job {
+        static final AtomicInteger count = new AtomicInteger(0);
+
+        static void reset() { count.set(0); }
+
+        @Override
+        public void execute(JobExecutionContext context) {
+            count.incrementAndGet();
         }
     }
 
@@ -423,6 +436,34 @@ class JobControllerTest {
         BlockingJob.release.countDown();
     }
 
+    @Test
+    void pauseJob_manuallyTriggeredJob_completesNormally() throws Exception {
+        BlockingJob.reset();
+        registerJobWithCronTrigger("manual-pause", BlockingJob.class, "0 0 0 1 1 ? 2099");
+
+        // Manually trigger and wait for it to start executing
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-pause/trigger"))
+                .hasStatusOk();
+        assertThat(BlockingJob.started.await(5, TimeUnit.SECONDS))
+                .as("BlockingJob should have started")
+                .isTrue();
+
+        // Pause while the manually triggered job is still running
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-pause/pause"))
+                .hasStatusOk();
+
+        // Job should still be executing despite the pause
+        assertThat(scheduler.getCurrentlyExecutingJobs())
+                .extracting(ctx -> ctx.getJobDetail().getKey().getName())
+                .contains("manual-pause");
+
+        // Release the job and verify it completes
+        BlockingJob.release.countDown();
+        await().atMost(3, SECONDS)
+                .until(() -> scheduler.getCurrentlyExecutingJobs().stream()
+                        .noneMatch(ctx -> ctx.getJobDetail().getKey().getName().equals("manual-pause")));
+    }
+
     // -- Resume tests --
 
     @Test
@@ -495,6 +536,27 @@ class JobControllerTest {
     void resumeJob_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/resume"))
                 .hasStatus(404);
+    }
+
+    @Test
+    void resumeJob_afterManualTrigger_doesNotReFireManualTrigger() throws Exception {
+        // Far-future cron so it never fires on its own
+        registerJobWithCronTrigger("manual-resume", CountingJob.class, "0 0 0 1 1 ? 2099");
+
+        // Manually trigger and wait for it to complete
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-resume/trigger"))
+                .hasStatusOk();
+        await().atMost(3, SECONDS).until(() -> CountingJob.count.get() == 1);
+
+        // Pause then resume
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-resume/pause"))
+                .hasStatusOk();
+        assertThat(mockMvcTester.post().uri("/api/jobs/manual-resume/resume"))
+                .hasStatusOk();
+
+        // Assert count stays at 1 (no second execution)
+        await().during(500, TimeUnit.MILLISECONDS).atMost(1, SECONDS)
+                .untilAsserted(() -> assertThat(CountingJob.count.get()).isEqualTo(1));
     }
 
     // -- Skip-next endpoint tests --
