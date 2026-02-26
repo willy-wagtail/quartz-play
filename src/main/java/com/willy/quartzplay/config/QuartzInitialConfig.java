@@ -53,9 +53,11 @@ public class QuartzInitialConfig {
   }
 
   @Bean
-  JobInterruptProducerAdapter jobInterruptProducerAdapter(KafkaTemplate<String, String> kafkaTemplate,
-                                                          ObjectMapper objectMapper) {
-    return JobInterruptProducerAdapter.create(kafkaTemplate, objectMapper);
+  JobInterruptProducerAdapter jobInterruptProducerAdapter(
+      KafkaTemplate<String, String> kafkaTemplate,
+      ObjectMapper objectMapper,
+      InterruptTopicProperties interruptTopicProperties) {
+    return JobInterruptProducerAdapter.create(kafkaTemplate, objectMapper, interruptTopicProperties.getName());
   }
 
   @Bean

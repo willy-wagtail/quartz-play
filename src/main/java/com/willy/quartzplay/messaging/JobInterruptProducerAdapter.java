@@ -8,26 +8,29 @@ public class JobInterruptProducerAdapter {
 
     private final Kafka kafka;
     private final ObjectMapper objectMapper;
+    private final String topicName;
 
     public static JobInterruptProducerAdapter create(KafkaTemplate<String, String> kafkaTemplate,
-                                                      ObjectMapper objectMapper) {
-        return new JobInterruptProducerAdapter(new RealKafka(kafkaTemplate), objectMapper);
+                                                      ObjectMapper objectMapper,
+                                                      String topicName) {
+        return new JobInterruptProducerAdapter(new RealKafka(kafkaTemplate), objectMapper, topicName);
     }
 
     public static JobInterruptProducerAdapter createNull(ObjectMapper objectMapper,
                                                           List<String> sentMessages) {
-        return new JobInterruptProducerAdapter(new NulledKafka(sentMessages), objectMapper);
+        return new JobInterruptProducerAdapter(new NulledKafka(sentMessages), objectMapper, "test-topic");
     }
 
-    private JobInterruptProducerAdapter(Kafka kafka, ObjectMapper objectMapper) {
+    private JobInterruptProducerAdapter(Kafka kafka, ObjectMapper objectMapper, String topicName) {
         this.kafka = kafka;
         this.objectMapper = objectMapper;
+        this.topicName = topicName;
     }
 
     public void sendInterrupt(String jobName, String jobGroup, String fireInstanceId) {
         var command = new InterruptJobCommand(jobName, jobGroup, fireInstanceId);
         String json = objectMapper.writeValueAsString(command);
-        kafka.send("job-interrupts", jobName, json);
+        kafka.send(topicName, jobName, json);
     }
 
     private interface Kafka {

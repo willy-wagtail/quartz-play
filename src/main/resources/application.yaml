@@ -46,3 +46,8 @@ management:
 app:
   jobs:
     example-job-cron: "0 0 * * * ?" # Every hour
+  kafka:
+    interrupt-topic:
+      name: job-interrupts
+      partitions: 1
+      replication-factor: 1

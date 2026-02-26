@@ -18,8 +18,8 @@ public class JobInterruptConsumer {
         this.objectMapper = objectMapper;
     }
 
-    @KafkaListener(topics = "job-interrupts",
-                   groupId = "job-interrupt-#{T(java.util.UUID).randomUUID().toString()}")
+    @KafkaListener(topics = "${app.kafka.interrupt-topic.name}",
+                   groupId = "${app.kafka.interrupt-topic.name}-#{T(java.net.InetAddress).getLocalHost().getHostName()}")
     public void onInterrupt(String message) throws SchedulerException {
         InterruptJobCommand command = objectMapper.readValue(message, InterruptJobCommand.class);
         jobManagementService.interruptLocalExecution(
