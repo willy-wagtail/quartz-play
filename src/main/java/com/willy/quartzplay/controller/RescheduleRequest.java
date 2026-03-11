@@ -1,4 +1,4 @@
 package com.willy.quartzplay.controller;
 
-public record RescheduleRequest(String cronExpression) {
+public record RescheduleRequest(String cronExpression, String timezone) {
 }

@@ -1,5 +1,6 @@
 package com.willy.quartzplay.config;
 
+import com.willy.quartzplay.job.AutomationJob;
 import com.willy.quartzplay.job.ExampleJob;
 import com.willy.quartzplay.listener.SkipNextTriggerListener;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
@@ -12,6 +13,7 @@ import com.willy.quartzplay.repository.SkipNextStorageAdapter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.stream.Collectors;
 import org.quartz.*;
 import org.quartz.impl.matchers.GroupMatcher;
@@ -90,14 +92,42 @@ public class QuartzInitialConfig {
 
   @Bean
   Trigger exampleJobTrigger(JobDetail exampleJobDetail) {
-    return TriggerBuilder.newTrigger()
-        .forJob(exampleJobDetail)
-        .withIdentity(JobName.EXAMPLE_JOB.toString())
-        // DoNothing: skip missed firings (e.g. while paused) and wait for the next cron tick.
-        // Without this, the default (FireAndProceed) would immediately fire on resume.
-        .withSchedule(CronScheduleBuilder.cronSchedule(cronProperties.getExampleJobCron())
-            .withMisfireHandlingInstructionDoNothing())
+    return buildCronTrigger(exampleJobDetail, JobName.EXAMPLE_JOB, cronProperties.getExampleJob());
+  }
+
+  @Bean
+  JobDetail automationJobDetail() {
+    return JobBuilder.newJob(AutomationJob.class)
+        .withIdentity(JobName.AUTOMATION_JOB.toString())
+        .storeDurably()
         .build();
+  }
+
+  @Bean
+  Trigger automationJobTrigger(JobDetail automationJobDetail) {
+    return buildCronTrigger(automationJobDetail, JobName.AUTOMATION_JOB, cronProperties.getAutomationJob());
+  }
+
+  private static Trigger buildCronTrigger(JobDetail jobDetail, JobName jobName,
+                                          JobCronProperties.JobSchedule schedule) {
+    CronScheduleBuilder cronSchedule = CronScheduleBuilder.cronSchedule(schedule.getCron())
+        .withMisfireHandlingInstructionDoNothing();
+    if (schedule.getTimezone() != null) {
+      requireValidTimezone(schedule.getTimezone(), jobName);
+      cronSchedule = cronSchedule.inTimeZone(TimeZone.getTimeZone(schedule.getTimezone()));
+    }
+    return TriggerBuilder.newTrigger()
+        .forJob(jobDetail)
+        .withIdentity(jobName.toString())
+        .withSchedule(cronSchedule)
+        .build();
+  }
+
+  private static void requireValidTimezone(String timezone, JobName jobName) {
+    if (!Set.of(TimeZone.getAvailableIDs()).contains(timezone)) {
+      throw new IllegalArgumentException(
+          "Invalid timezone '%s' for job %s".formatted(timezone, jobName));
+    }
   }
 
   @Bean

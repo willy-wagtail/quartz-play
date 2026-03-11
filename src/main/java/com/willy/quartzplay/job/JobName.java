@@ -2,7 +2,8 @@ package com.willy.quartzplay.job;
 
 public enum JobName {
 
-    EXAMPLE_JOB("example-job");
+    EXAMPLE_JOB("example-job"),
+    AUTOMATION_JOB("automation-job");
 
     private final String value;
 

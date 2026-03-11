@@ -61,7 +61,7 @@ public class JobController {
     @PostMapping("/{name}/reschedule")
     public ResponseEntity<JobResponse> reschedule(@PathVariable String name,
                                                   @RequestBody RescheduleRequest request) {
-        jobManagementService.rescheduleJob(name, request.cronExpression());
+        jobManagementService.rescheduleJob(name, request.cronExpression(), request.timezone());
         return ResponseEntity.ok(new JobResponse("rescheduled", name));
     }
 

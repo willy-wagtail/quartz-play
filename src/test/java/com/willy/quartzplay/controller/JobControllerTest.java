@@ -964,7 +964,7 @@ class JobControllerTest {
 
         assertThat(mockMvcTester.post().uri("/api/jobs/resched-job/reschedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .content("{\"cronExpression\":\"0 30 * * * ?\",\"timezone\":\"UTC\"}"))
                 .hasStatusOk()
                 .bodyJson()
                 .extractingPath("status").asString().isEqualTo("rescheduled");
@@ -984,7 +984,7 @@ class JobControllerTest {
 
         assertThat(mockMvcTester.post().uri("/api/jobs/paused-resched/reschedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .content("{\"cronExpression\":\"0 30 * * * ?\",\"timezone\":\"UTC\"}"))
                 .hasStatusOk();
 
         assertThat(scheduler.getTriggerState(TriggerKey.triggerKey("paused-resched-trigger")))
@@ -997,7 +997,7 @@ class JobControllerTest {
     void reschedule_nonExistentJob_returns404() {
         assertThat(mockMvcTester.post().uri("/api/jobs/no-such-job/reschedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .content("{\"cronExpression\":\"0 30 * * * ?\",\"timezone\":\"UTC\"}"))
                 .hasStatus(404);
     }
 
@@ -1007,7 +1007,7 @@ class JobControllerTest {
 
         assertThat(mockMvcTester.post().uri("/api/jobs/durable-only/reschedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"cronExpression\":\"0 30 * * * ?\"}"))
+                .content("{\"cronExpression\":\"0 30 * * * ?\",\"timezone\":\"UTC\"}"))
                 .hasStatus(409);
     }
 
@@ -1017,7 +1017,7 @@ class JobControllerTest {
 
         assertThat(mockMvcTester.post().uri("/api/jobs/bad-cron-job/reschedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"cronExpression\":\"not-a-cron\"}"))
+                .content("{\"cronExpression\":\"not-a-cron\",\"timezone\":\"UTC\"}"))
                 .hasStatus(400);
     }
 

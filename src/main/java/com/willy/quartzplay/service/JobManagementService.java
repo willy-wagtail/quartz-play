@@ -21,6 +21,7 @@ import java.util.*;
 public class JobManagementService {
 
   private static final Logger log = LoggerFactory.getLogger(JobManagementService.class);
+  private static final Set<String> VALID_TIMEZONE_IDS = Set.of(TimeZone.getAvailableIDs());
   private final Scheduler scheduler;
   private final FiredTriggerStorageAdapter firedTriggerStorage;
   private final JobInterruptProducerAdapter jobInterruptProducer;
@@ -127,7 +128,7 @@ public class JobManagementService {
     }
   }
 
-  public void rescheduleJob(String jobName, String cronExpression) {
+  public void rescheduleJob(String jobName, String cronExpression, String timezone) {
     try {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
@@ -135,17 +136,23 @@ public class JobManagementService {
       if (!CronExpression.isValidExpression(cronExpression)) {
         throw new InvalidCronExpressionException(cronExpression);
       }
+      if (!VALID_TIMEZONE_IDS.contains(timezone)) {
+        throw new InvalidTimezoneException(timezone);
+      }
 
       requireExactlyOneCronTrigger(jobKey);
 
       CronTrigger ct = getCronTriggers(jobKey).getFirst();
       boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
 
+      CronScheduleBuilder schedule = CronScheduleBuilder.cronSchedule(cronExpression)
+          .inTimeZone(TimeZone.getTimeZone(timezone))
+          .withMisfireHandlingInstructionDoNothing();
+
       Trigger newTrigger = TriggerBuilder.newTrigger()
           .withIdentity(ct.getKey())
           .forJob(jobKey)
-          .withSchedule(CronScheduleBuilder.cronSchedule(cronExpression)
-              .withMisfireHandlingInstructionDoNothing())
+          .withSchedule(schedule)
           .build();
 
       scheduler.rescheduleJob(ct.getKey(), newTrigger);
@@ -154,7 +161,7 @@ public class JobManagementService {
         scheduler.pauseTrigger(ct.getKey());
       }
 
-      log.info("Rescheduled job: {} with cron: {}", jobName, cronExpression);
+      log.info("Rescheduled job: {} with cron: {} timezone: {}", jobName, cronExpression, timezone);
       logNextFireTime(jobKey);
     } catch (SchedulerException e) {
       throw new RescheduleException(jobName, e);
@@ -467,6 +474,13 @@ public class JobManagementService {
   public static class InvalidCronExpressionException extends RuntimeException {
     public InvalidCronExpressionException(String cronExpression) {
       super("Invalid cron expression: " + cronExpression);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  public static class InvalidTimezoneException extends RuntimeException {
+    public InvalidTimezoneException(String timezone) {
+      super("Invalid timezone: " + timezone);
     }
   }
 
