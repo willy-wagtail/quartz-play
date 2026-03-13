@@ -14,14 +14,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.*;
 
 @Service
 public class JobManagementService {
 
   private static final Logger log = LoggerFactory.getLogger(JobManagementService.class);
-  private static final Set<String> VALID_TIMEZONE_IDS = Set.of(TimeZone.getAvailableIDs());
+
   private final Scheduler scheduler;
   private final FiredTriggerStorageAdapter firedTriggerStorage;
   private final JobInterruptProducerAdapter jobInterruptProducer;
@@ -133,12 +135,9 @@ public class JobManagementService {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
 
-      if (!CronExpression.isValidExpression(cronExpression)) {
-        throw new InvalidCronExpressionException(cronExpression);
-      }
-      if (!VALID_TIMEZONE_IDS.contains(timezone)) {
-        throw new InvalidTimezoneException(timezone);
-      }
+      requireValidCronExpression(cronExpression);
+
+      ZoneId zone = requireValidTimezone(timezone);
 
       requireExactlyOneCronTrigger(jobKey);
 
@@ -146,7 +145,7 @@ public class JobManagementService {
       boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
 
       CronScheduleBuilder schedule = CronScheduleBuilder.cronSchedule(cronExpression)
-          .inTimeZone(TimeZone.getTimeZone(timezone))
+          .inTimeZone(TimeZone.getTimeZone(zone))
           .withMisfireHandlingInstructionDoNothing();
 
       Trigger newTrigger = TriggerBuilder.newTrigger()
@@ -326,6 +325,20 @@ public class JobManagementService {
         .stream()
         .map(JobExecutionContext::getJobDetail)
         .anyMatch(detail -> detail.getKey().equals(jobKey));
+  }
+
+  private void requireValidCronExpression(String cronExpression) {
+    if (!CronExpression.isValidExpression(cronExpression)) {
+      throw new InvalidCronExpressionException(cronExpression);
+    }
+  }
+
+  private ZoneId requireValidTimezone(String timezone) {
+    try {
+      return ZoneId.of(timezone);
+    } catch (DateTimeException e) {
+      throw new InvalidTimezoneException(timezone);
+    }
   }
 
   private void requireJobExists(JobKey jobKey) throws SchedulerException {

@@ -1022,6 +1022,16 @@ class JobControllerTest {
     }
 
     @Test
+    void reschedule_invalidTimezone_returns400() throws Exception {
+        registerJobWithCronTrigger("bad-tz-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.post().uri("/api/jobs/bad-tz-job/reschedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"cronExpression\":\"0 30 * * * ?\",\"timezone\":\"Not/A_Timezone\"}"))
+                .hasStatus(400);
+    }
+
+    @Test
     void skipNext_afterVeto_subsequentCronFiresNormally() throws Exception {
         // Delay start so the skip flag is set before the first cron firing
         registerJobWithCronTrigger("resume-after-skip", RecordingJob.class, "* * * * * ?", 2);
