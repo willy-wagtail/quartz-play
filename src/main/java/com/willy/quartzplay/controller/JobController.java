@@ -3,9 +3,9 @@ package com.willy.quartzplay.controller;
 import com.willy.quartzplay.service.JobManagementService;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 //   GET /actuator/quartz/triggers                 — all trigger groups and their trigger names
 //   GET /actuator/quartz/triggers/{group}         — trigger names within a group
 //   GET /actuator/quartz/triggers/{group}/{name}  — detail for a single trigger (schedule, state, fire times)
+
 @RestController
 @RequestMapping("/api/jobs")
 public class JobController {
@@ -30,8 +31,8 @@ public class JobController {
     }
 
     @GetMapping
-    public ResponseEntity<List<JobDetailResponse>> listJobs() {
-        return ResponseEntity.ok(jobManagementService.listJobs());
+    public ResponseEntity<List<JobInfo>> listJobs() {
+        return ResponseEntity.ok(jobManagementService.listJobInfo());
     }
 
     @PostMapping("/{name}/trigger")

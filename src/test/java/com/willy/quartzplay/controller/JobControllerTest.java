@@ -278,6 +278,50 @@ class JobControllerTest {
         scheduler.scheduleJob(job, tb.build());
     }
 
+    // -- List jobs (summary) tests --
+
+    @Test
+    void listJobs_returnsSummaryWithCronAndTimezoneAndStateAndFireTimes() throws Exception {
+        registerJobWithCronTrigger("summary-job", NullJob.class, "0 0 0 * * ?");
+
+        assertThat(mockMvcTester.get().uri("/api/jobs"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[?(@.jobName == 'summary-job')]").asList()
+                .singleElement()
+                .satisfies(obj -> {
+                    @SuppressWarnings("unchecked")
+                    var map = (java.util.Map<String, Object>) obj;
+                    assertThat(map.get("jobName")).isEqualTo("summary-job");
+                    assertThat(map.get("state")).isEqualTo("NORMAL");
+                    assertThat(map.get("currentlyRunning")).isEqualTo(false);
+                    assertThat(map.get("cronExpression")).isEqualTo("0 0 0 * * ?");
+                    assertThat(map.get("timezone")).isEqualTo(java.util.TimeZone.getDefault().getID());
+                    assertThat(map.get("nextFireTime")).isNotNull();
+                    assertThat(map).doesNotContainKey("error");
+                });
+    }
+
+    @Test
+    void listJobs_durableJobWithNoTriggers_returnsMisconfigured() throws Exception {
+        registerJob("durable-summary", NullJob.class);
+
+        assertThat(mockMvcTester.get().uri("/api/jobs"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[?(@.jobName == 'durable-summary')]").asList()
+                .singleElement()
+                .satisfies(obj -> {
+                    @SuppressWarnings("unchecked")
+                    var map = (java.util.Map<String, Object>) obj;
+                    assertThat(map.get("state")).isEqualTo("MISCONFIGURED");
+                    assertThat((String) map.get("error")).contains(
+                            "no trigger", "expected exactly one CronTrigger");
+                    assertThat(map.get("currentlyRunning")).isEqualTo(false);
+                    assertThat(map).doesNotContainKey("cronExpression");
+                });
+    }
+
     // -- Trigger tests --
 
     @Test
@@ -597,11 +641,11 @@ class JobControllerTest {
     }
 
     @Test
-    void skipNext_jobWithOnlySimpleTrigger_returns409() throws Exception {
+    void skipNext_jobWithNonCronTrigger_returns500() throws Exception {
         registerJobWithSimpleTrigger("simple-trigger-job", NullJob.class);
 
         assertThat(mockMvcTester.post().uri("/api/jobs/simple-trigger-job/skip-next"))
-                .hasStatus(409);
+                .hasStatus(500);
     }
 
     @Test

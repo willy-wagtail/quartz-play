@@ -1,6 +1,8 @@
 package com.willy.quartzplay.service;
 
-import com.willy.quartzplay.controller.JobDetailResponse;
+import com.willy.quartzplay.controller.JobInfo;
+import com.willy.quartzplay.controller.JobSummary;
+import com.willy.quartzplay.controller.MisconfiguredJob;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
 import com.willy.quartzplay.messaging.JobInterruptProducerAdapter;
 import com.willy.quartzplay.repository.FiredTriggerStorageAdapter;
@@ -15,7 +17,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.ResponseStatus;
 
 import java.time.DateTimeException;
-import java.time.Instant;
 import java.time.ZoneId;
 import java.util.*;
 
@@ -37,50 +38,11 @@ public class JobManagementService {
     this.skipNextStorage = skipNextStorage;
   }
 
-  private static Instant toInstant(Date date) {
-    return date != null ? date.toInstant() : null;
-  }
-
-  public List<JobDetailResponse> listJobs() {
+  public List<JobInfo> listJobInfo() {
     try {
-      List<JobDetailResponse> result = new ArrayList<>();
-      Set<JobKey> jobKeys = scheduler.getJobKeys(GroupMatcher.anyGroup());
-
-      Set<JobKey> runningJobKeys = Set.copyOf(
-          scheduler.getCurrentlyExecutingJobs().stream()
-              .map(ctx -> ctx.getJobDetail().getKey())
-              .toList()
-      );
-
-      for (JobKey jobKey : jobKeys) {
-        JobDetail detail = scheduler.getJobDetail(jobKey);
-        List<? extends Trigger> triggers = scheduler.getTriggersOfJob(jobKey);
-
-        List<JobDetailResponse.TriggerInfo> triggerInfos = triggers.stream()
-            .map(trigger -> {
-              try {
-                String cronExpr = trigger instanceof CronTrigger cron ? cron.getCronExpression() : null;
-                Trigger.TriggerState state = scheduler.getTriggerState(trigger.getKey());
-                return new JobDetailResponse.TriggerInfo(
-                    trigger.getKey().getName(),
-                    state.name(),
-                    cronExpr,
-                    toInstant(trigger.getNextFireTime()),
-                    toInstant(trigger.getPreviousFireTime())
-                );
-              } catch (SchedulerException e) {
-                throw new JobListException(e);
-              }
-            })
-            .toList();
-
-        result.add(new JobDetailResponse(
-            jobKey.getName(),
-            jobKey.getGroup(),
-            detail.getJobClass().getSimpleName(),
-            runningJobKeys.contains(jobKey),
-            triggerInfos
-        ));
+      List<JobInfo> result = new ArrayList<>();
+      for (JobKey jobKey : scheduler.getJobKeys(GroupMatcher.anyGroup())) {
+        result.add(getJobInfo(jobKey));
       }
       return result;
     } catch (SchedulerException e) {
@@ -139,9 +101,7 @@ public class JobManagementService {
 
       ZoneId zone = requireValidTimezone(timezone);
 
-      requireExactlyOneCronTrigger(jobKey);
-
-      CronTrigger ct = getCronTriggers(jobKey).getFirst();
+      CronTrigger ct = requireExactlyOneCronTrigger(jobKey);
       boolean wasPaused = scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
 
       CronScheduleBuilder schedule = CronScheduleBuilder.cronSchedule(cronExpression)
@@ -174,22 +134,9 @@ public class JobManagementService {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
 
-      List<CronTrigger> cronTriggers = getCronTriggers(jobKey);
+      CronTrigger ct = requireExactlyOneCronTrigger(jobKey);
 
-      if (cronTriggers.isEmpty()) {
-        throw new NoCronTriggersException(jobName);
-      }
-
-      boolean allPaused = cronTriggers.stream()
-          .allMatch(ct -> {
-            try {
-              return scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED;
-            } catch (SchedulerException e) {
-              throw new SkipNextException(jobName, e);
-            }
-          });
-
-      if (allPaused) {
+      if (scheduler.getTriggerState(ct.getKey()) == Trigger.TriggerState.PAUSED) {
         throw new JobPausedException(jobName);
       }
 
@@ -227,7 +174,6 @@ public class JobManagementService {
       JobKey jobKey = JobKey.jobKey(jobName);
       requireJobExists(jobKey);
       requireJobNotRunning(jobKey);
-      requireJobNotRunningOnAnyNode(jobKey);
 
       scheduler.deleteJob(jobKey);
       skipNextStorage.delete(jobName);
@@ -319,12 +265,17 @@ public class JobManagementService {
         .ifPresent(t -> log.info("{}: Next fire time: {}", jobKey.getName(), t.getNextFireTime().toInstant()));
   }
 
-  private boolean isAlreadyRunning(JobKey jobKey) throws SchedulerException {
-    return scheduler
-        .getCurrentlyExecutingJobs()
-        .stream()
-        .map(JobExecutionContext::getJobDetail)
-        .anyMatch(detail -> detail.getKey().equals(jobKey));
+  private boolean isJobRunning(JobKey jobKey) throws SchedulerException {
+    // Local check (fast path for same-node execution)
+    boolean locallyRunning = scheduler.getCurrentlyExecutingJobs().stream()
+        .anyMatch(ctx -> ctx.getJobDetail().getKey().equals(jobKey));
+    if (locallyRunning) {
+      return true;
+    }
+    // Cluster-wide check via QRTZ_FIRED_TRIGGERS
+    return firedTriggerStorage.findExecutingTrigger(
+        scheduler.getSchedulerName(), jobKey.getName(), jobKey.getGroup()
+    ).isPresent();
   }
 
   private void requireValidCronExpression(String cronExpression) {
@@ -354,42 +305,42 @@ public class JobManagementService {
     }
   }
 
-  private List<CronTrigger> getCronTriggers(JobKey jobKey) throws SchedulerException {
-    return scheduler
-        .getTriggersOfJob(jobKey).stream()
-        .filter(CronTrigger.class::isInstance)
-        .map(CronTrigger.class::cast)
-        .toList();
+  private JobInfo getJobInfo(JobKey jobKey) throws SchedulerException {
+    try {
+      CronTrigger ct = requireExactlyOneCronTrigger(jobKey);
+      return new JobSummary(
+          jobKey.getName(),
+          scheduler.getTriggerState(ct.getKey()).name(),
+          isJobRunning(jobKey),
+          ct.getCronExpression(),
+          ct.getTimeZone().getID(),
+          ct.getNextFireTime() != null ? ct.getNextFireTime().toInstant() : null,
+          ct.getPreviousFireTime() != null ? ct.getPreviousFireTime().toInstant() : null
+      );
+    } catch (NoCronTriggersException | MultipleTriggersException | NotCronTriggerException e) {
+      log.warn("Misconfigured job {}: {}", jobKey.getName(), e.getMessage());
+      return new MisconfiguredJob(jobKey.getName(), e.getMessage(), isJobRunning(jobKey));
+    }
   }
 
-  private void requireExactlyOneCronTrigger(JobKey jobKey) throws SchedulerException {
-    long count = scheduler
-        .getTriggersOfJob(jobKey).stream()
-        .filter(CronTrigger.class::isInstance)
-        .count();
-
-    if (count == 0) {
+  private CronTrigger requireExactlyOneCronTrigger(JobKey jobKey) throws SchedulerException {
+    List<? extends Trigger> triggers = scheduler.getTriggersOfJob(jobKey);
+    if (triggers.isEmpty()) {
       throw new NoCronTriggersException(jobKey.getName());
     }
-    if (count > 1) {
-      throw new MultipleCronTriggersException(jobKey.getName());
+    if (triggers.size() > 1) {
+      throw new MultipleTriggersException(jobKey.getName());
     }
+    if (!(triggers.getFirst() instanceof CronTrigger ct)) {
+      throw new NotCronTriggerException(jobKey.getName());
+    }
+    return ct;
   }
 
   private void requireJobNotRunning(JobKey jobKey) throws SchedulerException {
-    if (isAlreadyRunning(jobKey)) {
+    if (isJobRunning(jobKey)) {
       throw new JobAlreadyRunningException(jobKey.getName());
     }
-  }
-
-  // Checks the QRTZ_FIRED_TRIGGERS table, which covers all nodes in a cluster.
-  // requireJobNotRunning only checks local execution via getCurrentlyExecutingJobs().
-  private void requireJobNotRunningOnAnyNode(JobKey jobKey) throws SchedulerException {
-    firedTriggerStorage.findExecutingTrigger(
-        scheduler.getSchedulerName(), jobKey.getName(), jobKey.getGroup()
-    ).ifPresent(_ -> {
-      throw new JobAlreadyRunningException(jobKey.getName());
-    });
   }
 
   @ResponseStatus(HttpStatus.NOT_FOUND)
@@ -465,14 +416,7 @@ public class JobManagementService {
   @ResponseStatus(HttpStatus.CONFLICT)
   public static class NoCronTriggersException extends RuntimeException {
     public NoCronTriggersException(String jobName) {
-      super("Job has no cron triggers: " + jobName);
-    }
-  }
-
-  @ResponseStatus(HttpStatus.CONFLICT)
-  public static class MultipleCronTriggersException extends RuntimeException {
-    public MultipleCronTriggersException(String jobName) {
-      super("Job has multiple cron triggers (expected exactly one): " + jobName);
+      super("Job has no trigger (expected exactly one CronTrigger): " + jobName);
     }
   }
 
@@ -508,6 +452,20 @@ public class JobManagementService {
   public static class JobDeleteException extends RuntimeException {
     public JobDeleteException(String jobName, Throwable cause) {
       super("Failed to delete job: " + jobName, cause);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class MultipleTriggersException extends RuntimeException {
+    public MultipleTriggersException(String jobName) {
+      super("Job has multiple triggers (expected exactly one CronTrigger): " + jobName);
+    }
+  }
+
+  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+  public static class NotCronTriggerException extends RuntimeException {
+    public NotCronTriggerException(String jobName) {
+      super("Job trigger is not a CronTrigger (expected exactly one CronTrigger): " + jobName);
     }
   }
 }
