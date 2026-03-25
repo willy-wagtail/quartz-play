@@ -7,6 +7,7 @@ public class JobCronProperties {
 
     private JobSchedule exampleJob;
     private JobSchedule automationJob;
+    private JobSchedule healthCheckJob;
 
     public JobSchedule getExampleJob() {
         return exampleJob;
@@ -22,6 +23,14 @@ public class JobCronProperties {
 
     public void setAutomationJob(JobSchedule automationJob) {
         this.automationJob = automationJob;
+    }
+
+    public JobSchedule getHealthCheckJob() {
+        return healthCheckJob;
+    }
+
+    public void setHealthCheckJob(JobSchedule healthCheckJob) {
+        this.healthCheckJob = healthCheckJob;
     }
 
     public static class JobSchedule {

@@ -10,7 +10,7 @@ public record MisconfiguredJob(
 
     @JsonProperty
     @Override
-    public String state() {
-        return "MISCONFIGURED";
+    public JobState state() {
+        return JobState.MISCONFIGURED;
     }
 }

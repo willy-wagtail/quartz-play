@@ -2,6 +2,7 @@ package com.willy.quartzplay.config;
 
 import com.willy.quartzplay.job.AutomationJob;
 import com.willy.quartzplay.job.ExampleJob;
+import com.willy.quartzplay.job.HealthCheckJob;
 import com.willy.quartzplay.listener.SkipNextTriggerListener;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
 import com.willy.quartzplay.job.JobName;
@@ -106,6 +107,19 @@ public class QuartzInitialConfig {
   @Bean
   Trigger automationJobTrigger(JobDetail automationJobDetail) {
     return buildCronTrigger(automationJobDetail, JobName.AUTOMATION_JOB, cronProperties.getAutomationJob());
+  }
+
+  @Bean
+  JobDetail healthCheckJobDetail() {
+    return JobBuilder.newJob(HealthCheckJob.class)
+        .withIdentity(JobName.HEALTH_CHECK_JOB.toString())
+        .storeDurably()
+        .build();
+  }
+
+  @Bean
+  Trigger healthCheckJobTrigger(JobDetail healthCheckJobDetail) {
+    return buildCronTrigger(healthCheckJobDetail, JobName.HEALTH_CHECK_JOB, cronProperties.getHealthCheckJob());
   }
 
   private static Trigger buildCronTrigger(JobDetail jobDetail, JobName jobName,

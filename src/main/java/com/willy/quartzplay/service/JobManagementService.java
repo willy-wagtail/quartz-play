@@ -1,6 +1,7 @@
 package com.willy.quartzplay.service;
 
 import com.willy.quartzplay.controller.JobInfo;
+import com.willy.quartzplay.controller.JobState;
 import com.willy.quartzplay.controller.JobSummary;
 import com.willy.quartzplay.controller.MisconfiguredJob;
 import com.willy.quartzplay.listener.TriggerOriginJobListener;
@@ -18,7 +19,10 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 
 import java.time.DateTimeException;
 import java.time.ZoneId;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.TimeZone;
 
 @Service
 public class JobManagementService {
@@ -308,33 +312,59 @@ public class JobManagementService {
   private JobInfo getJobInfo(JobKey jobKey) throws SchedulerException {
     try {
       CronTrigger ct = requireExactlyOneCronTrigger(jobKey);
+      JobState jobState = isJobRunning(jobKey) ? JobState.RUNNING : JobState.IDLE;
       return new JobSummary(
           jobKey.getName(),
-          scheduler.getTriggerState(ct.getKey()).name(),
-          isJobRunning(jobKey),
-          ct.getCronExpression(),
-          ct.getTimeZone().getID(),
-          ct.getNextFireTime() != null ? ct.getNextFireTime().toInstant() : null,
-          ct.getPreviousFireTime() != null ? ct.getPreviousFireTime().toInstant() : null
+          jobState,
+          new JobSummary.CronTriggerInfo(
+              deriveCronTriggerState(ct),
+              ct.getCronExpression(),
+              ct.getTimeZone().getID(),
+              ct.getNextFireTime() != null ? ct.getNextFireTime().toInstant() : null,
+              ct.getPreviousFireTime() != null ? ct.getPreviousFireTime().toInstant() : null
+          )
       );
-    } catch (NoCronTriggersException | MultipleTriggersException | NotCronTriggerException e) {
+    } catch (NoCronTriggersException | MultipleTriggersException e) {
       log.warn("Misconfigured job {}: {}", jobKey.getName(), e.getMessage());
       return new MisconfiguredJob(jobKey.getName(), e.getMessage(), isJobRunning(jobKey));
     }
   }
 
+  private JobSummary.CronTriggerState deriveCronTriggerState(CronTrigger ct) throws SchedulerException {
+    return switch (scheduler.getTriggerState(ct.getKey())) {
+      case NORMAL -> JobSummary.CronTriggerState.ACTIVE;
+      case PAUSED -> JobSummary.CronTriggerState.PAUSED;
+      // COMPLETE: the cron expression has no more future fire times (e.g. a year-bound
+      // expression like "0 0 12 * * ? 2025" after 2025 ends). Uncommon for open-ended crons.
+      case COMPLETE -> JobSummary.CronTriggerState.COMPLETE;
+      // ERROR: the job store failed to fire the trigger (e.g. DB issue, serialization error).
+      // Not caused by job execution failures. The trigger won't fire again until resumed.
+      // No error message is stored on the trigger — check application logs for the root cause.
+      case ERROR -> JobSummary.CronTriggerState.ERROR;
+      // BLOCKED: Quartz sets this when a @DisallowConcurrentExecution job is executing.
+      // Transient state — the trigger returns to ACTIVE once the job finishes.
+      case BLOCKED -> JobSummary.CronTriggerState.ACTIVE;
+      // NONE: trigger not found in the job store. We already fetched it via getTriggersOfJob(),
+      // so this would only occur if the trigger was deleted between that call and this one.
+      case NONE -> JobSummary.CronTriggerState.ERROR;
+    };
+  }
+
+  // Quartz may attach transient SimpleTriggers for manual firings (scheduler.triggerJob()),
+  // so we filter to CronTriggers only and assert exactly one exists.
   private CronTrigger requireExactlyOneCronTrigger(JobKey jobKey) throws SchedulerException {
-    List<? extends Trigger> triggers = scheduler.getTriggersOfJob(jobKey);
-    if (triggers.isEmpty()) {
+    List<CronTrigger> cronTriggers = scheduler.getTriggersOfJob(jobKey).stream()
+        .filter(CronTrigger.class::isInstance)
+        .map(CronTrigger.class::cast)
+        .toList();
+
+    if (cronTriggers.isEmpty()) {
       throw new NoCronTriggersException(jobKey.getName());
     }
-    if (triggers.size() > 1) {
+    if (cronTriggers.size() > 1) {
       throw new MultipleTriggersException(jobKey.getName());
     }
-    if (!(triggers.getFirst() instanceof CronTrigger ct)) {
-      throw new NotCronTriggerException(jobKey.getName());
-    }
-    return ct;
+    return cronTriggers.getFirst();
   }
 
   private void requireJobNotRunning(JobKey jobKey) throws SchedulerException {
@@ -416,7 +446,7 @@ public class JobManagementService {
   @ResponseStatus(HttpStatus.CONFLICT)
   public static class NoCronTriggersException extends RuntimeException {
     public NoCronTriggersException(String jobName) {
-      super("Job has no trigger (expected exactly one CronTrigger): " + jobName);
+      super("Job has no CronTrigger (expected exactly one): " + jobName);
     }
   }
 
@@ -462,10 +492,4 @@ public class JobManagementService {
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
-  public static class NotCronTriggerException extends RuntimeException {
-    public NotCronTriggerException(String jobName) {
-      super("Job trigger is not a CronTrigger (expected exactly one CronTrigger): " + jobName);
-    }
-  }
 }
