@@ -12,9 +12,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 @Component
-public class DefaultPerformCheckThenAction implements PerformCheckThenAction {
+public class DefaultReadinessPoller implements ReadinessPoller {
 
-    private static final Logger log = LoggerFactory.getLogger(DefaultPerformCheckThenAction.class);
+    private static final Logger log = LoggerFactory.getLogger(DefaultReadinessPoller.class);
 
     private static String abbreviate(TimeUnit unit) {
         return switch (unit) {
@@ -29,31 +29,28 @@ public class DefaultPerformCheckThenAction implements PerformCheckThenAction {
     }
 
     @Override
-    public CompletableFuture<Boolean> executeOnSuccess(
+    public CompletableFuture<Boolean> pollUntilReady(
             Supplier<Boolean> check,
-            Runnable action,
             TimingConfiguration timing,
             AtomicBoolean interrupted) {
 
         CompletableFuture<Boolean> result = new CompletableFuture<>();
         ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
 
-        // Timeout: complete with false and shut down after stopAfter
         executor.schedule(() -> {
             if (result.complete(false)) {
-                log.info("Check-then-action timed out after {} {}", timing.stopAfter(), timing.unit());
+                log.info("Readiness poll timed out after {} {}", timing.stopAfter(), timing.unit());
             }
             executor.shutdown();
         }, timing.stopAfter(), timing.unit());
 
-        // Poll: check readiness at fixed delay intervals
         AtomicInteger attemptCount = new AtomicInteger(0);
         String unitAbbrev = abbreviate(timing.unit());
 
         executor.scheduleWithFixedDelay(() -> {
             if (interrupted.get()) {
                 if (result.complete(false)) {
-                    log.info("Check-then-action interrupted");
+                    log.info("Readiness poll interrupted");
                 }
                 executor.shutdown();
                 return;
@@ -69,10 +66,7 @@ public class DefaultPerformCheckThenAction implements PerformCheckThenAction {
                 return;
             }
 
-            action.run();
-            if (result.complete(true)) {
-                log.info("Check-then-action completed successfully");
-            }
+            result.complete(true);
             executor.shutdown();
         }, 0, timing.delay(), timing.unit());
 

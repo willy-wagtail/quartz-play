@@ -4,11 +4,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
-public interface PerformCheckThenAction {
+public interface ReadinessPoller {
 
-    CompletableFuture<Boolean> executeOnSuccess(
+    CompletableFuture<Boolean> pollUntilReady(
         Supplier<Boolean> check,
-        Runnable action,
         TimingConfiguration timing,
         AtomicBoolean interrupted
     );
