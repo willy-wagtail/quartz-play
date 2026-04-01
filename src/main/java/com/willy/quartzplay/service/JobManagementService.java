@@ -13,9 +13,7 @@ import org.quartz.*;
 import org.quartz.impl.matchers.GroupMatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.ResponseStatus;
 
 import java.time.DateTimeException;
 import java.time.ZoneId;
@@ -373,119 +371,102 @@ public class JobManagementService {
     }
   }
 
-  @ResponseStatus(HttpStatus.NOT_FOUND)
   public static class JobNotFoundException extends RuntimeException {
     public JobNotFoundException(String jobName) {
       super("Job not found: " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.CONFLICT)
   public static class JobAlreadyRunningException extends RuntimeException {
     public JobAlreadyRunningException(String jobName) {
       super("Job already running: " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobListException extends RuntimeException {
     public JobListException(Throwable cause) {
       super("Failed to list jobs", cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobTriggerException extends RuntimeException {
     public JobTriggerException(String jobName, Throwable cause) {
       super("Failed to trigger job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobPauseException extends RuntimeException {
     public JobPauseException(String jobName, Throwable cause) {
       super("Failed to pause job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobResumeException extends RuntimeException {
     public JobResumeException(String jobName, Throwable cause) {
       super("Failed to resume job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.CONFLICT)
   public static class JobNotRunningException extends RuntimeException {
     public JobNotRunningException(String jobName) {
       super("Job not running: " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.CONFLICT)
   public static class JobNotInterruptableException extends RuntimeException {
     public JobNotInterruptableException(String jobName) {
       super("Job does not support interruption: " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobInterruptException extends RuntimeException {
     public JobInterruptException(String jobName, Throwable cause) {
       super("Failed to interrupt job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.CONFLICT)
   public static class JobPausedException extends RuntimeException {
     public JobPausedException(String jobName) {
       super("Job is paused: " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.CONFLICT)
   public static class NoCronTriggersException extends RuntimeException {
     public NoCronTriggersException(String jobName) {
       super("Job has no CronTrigger (expected exactly one): " + jobName);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class SkipNextException extends RuntimeException {
     public SkipNextException(String jobName, Throwable cause) {
       super("Failed to set skip-next for job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.BAD_REQUEST)
   public static class InvalidCronExpressionException extends RuntimeException {
     public InvalidCronExpressionException(String cronExpression) {
       super("Invalid cron expression: " + cronExpression);
     }
   }
 
-  @ResponseStatus(HttpStatus.BAD_REQUEST)
   public static class InvalidTimezoneException extends RuntimeException {
     public InvalidTimezoneException(String timezone) {
       super("Invalid timezone: " + timezone);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class RescheduleException extends RuntimeException {
     public RescheduleException(String jobName, Throwable cause) {
       super("Failed to reschedule job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class JobDeleteException extends RuntimeException {
     public JobDeleteException(String jobName, Throwable cause) {
       super("Failed to delete job: " + jobName, cause);
     }
   }
 
-  @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
   public static class MultipleTriggersException extends RuntimeException {
     public MultipleTriggersException(String jobName) {
       super("Job has multiple triggers (expected exactly one CronTrigger): " + jobName);

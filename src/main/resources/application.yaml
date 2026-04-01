@@ -55,6 +55,11 @@ app:
     health-check-job:
       cron: "0 */10 * * * ?" # Every 10 minutes
       timezone: UTC
+  external-service:
+    base-url: https://api.example.com
+    connect-timeout: 10s
+    response-timeout: 120s
+    connection-request-timeout: 5s
   kafka:
     interrupt-topic:
       name: job-interrupts
